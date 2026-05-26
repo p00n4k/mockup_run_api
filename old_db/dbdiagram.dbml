@@ -1,0 +1,202 @@
+// dbdiagram.io schema
+// Paste this at https://dbdiagram.io/d
+
+Project flood_run {
+  database_type: 'PostgreSQL'
+  Note: 'Running tracker database schema'
+}
+
+// ─── identity schema ─────────────────────────────────────────────────────────
+
+Table identity.users {
+  id int [pk, increment]
+  email varchar(255) [unique, not null]
+  name varchar(100) [not null]
+  created_at timestamp [default: `now()`]
+}
+
+Table identity.user_profiles {
+  id int [pk, increment]
+  user_id int [unique, not null, ref: > identity.users.id]
+  birthday date
+  gender varchar(30)
+  height_cm decimal(5,2)
+  weight_kg decimal(5,2)
+  step_length_cm decimal(5,2)
+  stride_length_cm decimal(5,2)
+  preferred_units varchar(20) [default: 'metric']
+  created_at timestamp [not null, default: `now()`]
+  updated_at timestamp [not null, default: `now()`]
+}
+
+Table identity.user_health_stats_smart_watch {
+  id int [pk, increment]
+  user_id int [unique, not null, ref: > identity.users.id]
+  resting_heart_rate_bpm int
+  max_heart_rate_bpm int
+  min_heart_rate_bpm int
+  avg_heart_rate_bpm int
+  vo2max decimal(5,2)
+  min_vo2max decimal(5,2)
+  max_vo2max decimal(5,2)
+  avg_vo2max decimal(5,2)
+  blood_oxygen_pct decimal(5,2)
+  min_blood_oxygen_pct decimal(5,2)
+  max_blood_oxygen_pct decimal(5,2)
+  avg_blood_oxygen_pct decimal(5,2)
+  respiratory_rate_bpm decimal(5,2)
+  min_respiratory_rate_bpm decimal(5,2)
+  max_respiratory_rate_bpm decimal(5,2)
+  avg_respiratory_rate_bpm decimal(5,2)
+  basal_metabolic_rate_kcal int
+  active_energy_kcal_avg int
+  min_active_energy_kcal int
+  max_active_energy_kcal int
+  sleep_duration_min_avg int
+  min_sleep_duration_min int
+  max_sleep_duration_min int
+  sleep_score_avg decimal(5,2)
+  min_sleep_score decimal(5,2)
+  max_sleep_score decimal(5,2)
+  stats_period_start timestamp
+  stats_period_end timestamp
+  created_at timestamp [not null, default: `now()`]
+  updated_at timestamp [not null, default: `now()`]
+}
+
+Table identity.run_smart_watch_summary {
+  id int [pk, increment]
+  session_id int [unique, not null, ref: > running.run_sessions.id]
+  avg_heart_rate_bpm int
+  min_heart_rate_bpm int
+  max_heart_rate_bpm int
+  avg_blood_oxygen_pct decimal(5,2)
+  min_blood_oxygen_pct decimal(5,2)
+  max_blood_oxygen_pct decimal(5,2)
+  avg_respiratory_rate_bpm decimal(5,2)
+  min_respiratory_rate_bpm decimal(5,2)
+  max_respiratory_rate_bpm decimal(5,2)
+  avg_hrv_ms decimal(6,2)
+  min_hrv_ms decimal(6,2)
+  max_hrv_ms decimal(6,2)
+  avg_cadence_spm int
+  min_cadence_spm int
+  max_cadence_spm int
+  calories_burned_kcal int
+  active_energy_kcal int
+  training_load decimal(6,2)
+  recovery_time_hr int
+  created_at timestamp [not null, default: `now()`]
+}
+
+// ─── running schema ───────────────────────────────────────────────────────────
+
+Table running.run_sessions {
+  id int [pk, increment]
+  user_id int [not null, ref: > identity.users.id]
+  started_at timestamp [not null]
+  ended_at timestamp
+  distance_km decimal(6,2)
+  duration_sec int
+  avg_pace_sec int
+  min_pace_sec int
+  max_pace_sec int
+  start_lat decimal(10,7)
+  start_lng decimal(10,7)
+  end_lat decimal(10,7)
+  end_lng decimal(10,7)
+  route_geojson json
+  route_polyline varchar(2000)
+  route_geom varchar [note: 'geometry(LineString, 4326)']
+}
+
+Table running.run_environment_summary {
+  id int [pk, increment]
+  session_id int [unique, not null, ref: > running.run_sessions.id]
+  avg_heat_index decimal(5,2)
+  min_heat_index decimal(5,2)
+  max_heat_index decimal(5,2)
+  avg_feels_like decimal(5,2)
+  min_feels_like decimal(5,2)
+  max_feels_like decimal(5,2)
+  avg_temperature decimal(5,2)
+  min_temperature decimal(5,2)
+  max_temperature decimal(5,2)
+  avg_humidity decimal(5,2)
+  min_humidity decimal(5,2)
+  max_humidity decimal(5,2)
+  avg_pm25 decimal(6,2)
+  min_pm25 decimal(6,2)
+  max_pm25 decimal(6,2)
+  avg_pm10 decimal(6,2)
+  min_pm10 decimal(6,2)
+  max_pm10 decimal(6,2)
+  avg_co decimal(8,3)
+  min_co decimal(8,3)
+  max_co decimal(8,3)
+  avg_aqi int
+  min_aqi int
+  max_aqi int
+  avg_uv_index decimal(4,2)
+  min_uv_index decimal(4,2)
+  max_uv_index decimal(4,2)
+  avg_wind_speed decimal(5,2)
+  min_wind_speed decimal(5,2)
+  max_wind_speed decimal(5,2)
+  avg_cloud_cover_pct decimal(5,2)
+  min_cloud_cover_pct decimal(5,2)
+  max_cloud_cover_pct decimal(5,2)
+}
+
+Table running.run_scores {
+  id int [pk, increment]
+  session_id int [unique, not null, ref: > running.run_sessions.id]
+  overall_score decimal(5,2) [not null]
+  heat_score decimal(5,2)
+  air_quality_score decimal(5,2)
+  uv_score decimal(5,2)
+  wind_score decimal(5,2)
+  humidity_score decimal(5,2)
+  cloud_score decimal(5,2)
+  grade varchar(20)
+  calories_burned_kcal int
+  calculated_at timestamp [not null, default: `now()`]
+}
+
+// biometric data streamed from smartwatch
+Table running.run_watch_point {
+  id bigint [pk, increment]
+  location_point_id bigint [unique, not null, ref: - running.run_location_point.id]
+  recorded_at timestamp [not null]
+  elapsed_sec int [note: 'seconds since session start']
+  heart_rate_bpm int
+  blood_oxygen_pct decimal(5,2)
+  hrv_ms decimal(6,2)
+  vo2max decimal(5,2)
+  cadence_spm int
+  respiratory_rate_bpm decimal(5,2)
+  calories_burned_kcal decimal(6,2) [note: 'cumulative']
+}
+
+// location + environment data from GPS device / external API
+Table running.run_location_point {
+  id bigint [pk, increment]
+  session_id int [not null, ref: > running.run_sessions.id]
+  recorded_at timestamp [not null]
+  elapsed_sec int [note: 'seconds since session start']
+  lat decimal(10,7)
+  lng decimal(10,7)
+  geom varchar [note: 'geometry(Point, 4326)']
+  distance_km decimal(6,3) [note: 'cumulative distance']
+  current_pace_sec int [note: 'sec/km at this moment']
+  elevation_m decimal(7,2) [note: 'from GPS or Elevation API']
+  temperature decimal(5,2)
+  humidity decimal(5,2)
+  feels_like decimal(5,2)
+  aqi int
+  pm25 decimal(6,2)
+  pm10 decimal(6,2)
+  co decimal(8,3)
+  uv_index decimal(4,2)
+  wind_speed decimal(5,2)
+}

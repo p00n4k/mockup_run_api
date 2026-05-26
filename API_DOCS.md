@@ -1,0 +1,744 @@
+﻿# Flood Run API — Documentation v2
+
+Base URL: `http://localhost:3000`
+
+> **Dev mode:** Auth middleware is bypassed. All protected endpoints use `user_id = 1` automatically. No real token required.
+
+## Schema notes (v2)
+
+| Change | Detail |
+|--------|--------|
+| `run_sessions` | Removed: `distance_km`, `start_lat`, `start_lng`, `end_lat`, `end_lng` — all derived from `run_location_point` |
+| `run_environment_summary` | Now a **VIEW** — no insert, auto-aggregates from `run_location_point` |
+| `run_smart_watch_summary` | Now a **VIEW** in `identity` schema — auto-aggregates from `run_watch_point` |
+| `run_location_point` | Added: `wind_direction`, `cloud_cover_pct`, `rain_probability` |
+
+---
+
+## Endpoint index
+
+| # | Method | Auth | Path | Description |
+|---|--------|------|------|-------------|
+| 1 | POST | Public | `/api/v1/auth/login` | Login, returns tokens |
+| 2 | POST | Public | `/api/v1/auth/refresh` | Refresh access token |
+| 3 | POST | JWT | `/api/v1/auth/logout` | Logout |
+| 4 | GET | JWT | `/api/v1/users/me` | Current user info |
+| 5 | GET | JWT | `/api/v1/users/me/profile` | Full profile + health stats |
+| 6 | POST | JWT | `/api/v1/users/me/profile` | Update profile |
+| 7 | GET | JWT | `/api/v1/run/session_history` | Session list (paginated) |
+| 8 | GET | JWT | `/api/v1/run/session/:id` | Session overview + scores |
+| 9 | GET | JWT | `/api/v1/run/session/:id/route` | Route geometry + per-min points |
+| 10 | GET | JWT | `/api/v1/run/session/:id/env` | Env summary + per-min readings |
+| 11 | GET | JWT | `/api/v1/run/session/:id/biometric` | Biometric summary + per-min readings |
+| 12 | GET | JWT | `/api/v1/run/weekly` | 7-day summary |
+| 13 | GET | JWT | `/api/v1/run/monthly` | Monthly summary |
+| 14 | GET | JWT | `/api/v1/run/nearby` | Nearby sessions (PostGIS) |
+| 15 | GET | Public | `/api/v1/run/env` | Current env at a location (mock) |
+| 16 | POST | JWT | `/api/v1/run/submit` | Submit run session + points batch |
+
+---
+
+## AUTH
+
+### 1. POST /api/v1/auth/login
+
+```bash
+curl -X POST http://localhost:3000/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "pawin@example.com", "password": "anypassword"}'
+```
+
+**Response**
+```json
+{
+  "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "refreshToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+}
+```
+
+---
+
+### 2. POST /api/v1/auth/refresh
+
+```bash
+curl -X POST http://localhost:3000/api/v1/auth/refresh \
+  -H "Content-Type: application/json" \
+  -d '{"refreshToken": "<your_refresh_token>"}'
+```
+
+**Response**
+```json
+{ "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." }
+```
+
+---
+
+### 3. POST /api/v1/auth/logout
+
+```bash
+curl -X POST http://localhost:3000/api/v1/auth/logout \
+  -H "Authorization: Bearer <your_access_token>"
+```
+
+**Response**
+```json
+{ "message": "Logged out successfully" }
+```
+
+---
+
+## USER
+
+### 4. GET /api/v1/users/me
+
+```bash
+curl http://localhost:3000/api/v1/users/me \
+  -H "Authorization: Bearer <your_access_token>"
+```
+
+**Response**
+```json
+{
+  "id": 1,
+  "name": "Pawin Khamlaksana",
+  "email": "pawin@example.com",
+  "profile_image_url": null
+}
+```
+
+---
+
+### 5. GET /api/v1/users/me/profile
+
+```bash
+curl http://localhost:3000/api/v1/users/me/profile \
+  -H "Authorization: Bearer <your_access_token>"
+```
+
+**Response**
+```json
+{
+  "id": 1,
+  "name": "Pawin Khamlaksana",
+  "email": "pawin@example.com",
+  "birthday": "2004-08-15",
+  "gender": "male",
+  "height_cm": "175.00",
+  "weight_kg": "68.50",
+  "step_length_cm": "72.00",
+  "stride_length_cm": "144.00",
+  "preferred_units": "metric",
+  "resting_heart_rate_bpm": 58,
+  "max_heart_rate_bpm": 190,
+  "min_heart_rate_bpm": 48,
+  "avg_heart_rate_bpm": 132,
+  "vo2max": "48.50",
+  "blood_oxygen_pct": "98.00",
+  "respiratory_rate_bpm": "15.20",
+  "basal_metabolic_rate_kcal": 1650,
+  "active_energy_kcal_avg": 520,
+  "sleep_duration_min_avg": 430,
+  "sleep_score_avg": "82.50",
+  "stats_period_start": "2026-04-25T00:00:00.000Z",
+  "stats_period_end": "2026-05-25T00:00:00.000Z",
+  "environment_scores": {
+    "score_all_time": "78.52",
+    "score_yearly":   "78.52",
+    "score_monthly":  "82.30",
+    "score_weekly":   "80.40"
+  }
+}
+```
+
+---
+
+### 6. POST /api/v1/users/me/profile
+
+Fields not sent are kept as-is (COALESCE upsert).
+
+```bash
+curl -X POST http://localhost:3000/api/v1/users/me/profile \
+  -H "Authorization: Bearer <your_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Pawin K.",
+    "birthday": "2004-08-15",
+    "gender": "male",
+    "height_cm": 175.0,
+    "weight_kg": 70.0,
+    "step_length_cm": 72.0,
+    "stride_length_cm": 144.0,
+    "preferred_units": "metric"
+  }'
+```
+
+**Response**
+```json
+{
+  "id": 1,
+  "name": "Pawin K.",
+  "email": "pawin@example.com",
+  "birthday": "2004-08-15",
+  "gender": "male",
+  "height_cm": "175.00",
+  "weight_kg": "70.00",
+  "step_length_cm": "72.00",
+  "stride_length_cm": "144.00",
+  "preferred_units": "metric",
+  "profile_image_url": null
+}
+```
+
+---
+
+## RUNNING
+
+### 7. GET /api/v1/run/session_history
+
+ประวัติการวิ่ง พร้อม `overall_score` และ `grade` สำหรับ calendar  
+`distance_km` ถูก derive จาก `MAX(run_location_point.distance_km)` ผ่าน lateral join
+
+| Query Param | Type | Required | Description |
+|-------------|------|----------|-------------|
+| `startDate` | ISO date | No | วันเริ่มต้น |
+| `endDate` | ISO date | No | วันสิ้นสุด |
+| `limit` | number | No | รายการต่อหน้า (default: 10) |
+| `offset` | number | No | ข้าม N รายการ (default: 0) |
+| `page` | number | No | แทน offset ได้ — `offset = (page-1) * limit` |
+
+```bash
+curl "http://localhost:3000/api/v1/run/session_history?limit=50&offset=0" \
+  -H "Authorization: Bearer <your_access_token>"
+
+curl "http://localhost:3000/api/v1/run/session_history?startDate=2026-05-01&endDate=2026-05-31&limit=10&offset=0" \
+  -H "Authorization: Bearer <your_access_token>"
+```
+
+**Response**
+```json
+[
+  {
+    "id": 1,
+    "started_at": "2026-05-24T06:00:00.000Z",
+    "ended_at": "2026-05-24T06:35:00.000Z",
+    "distance_km": "5.20",
+    "duration_sec": 2100,
+    "avg_pace_sec": 403,
+    "overall_score": "78.50",
+    "grade": "good"
+  },
+  {
+    "id": 2,
+    "started_at": "2026-05-22T06:15:00.000Z",
+    "ended_at": "2026-05-22T07:07:00.000Z",
+    "distance_km": "8.10",
+    "duration_sec": 3120,
+    "avg_pace_sec": 385,
+    "overall_score": "82.30",
+    "grade": "good"
+  }
+]
+```
+
+---
+
+### 8. GET /api/v1/run/session/:id
+
+Session overview — stats + คะแนนสิ่งแวดล้อมแยก category  
+`distance_km`, `start_lat/lng`, `end_lat/lng` derive จาก `run_location_point`
+
+```bash
+curl "http://localhost:3000/api/v1/run/session/1" \
+  -H "Authorization: Bearer <your_access_token>"
+```
+
+**Response**
+```json
+{
+  "id": 1,
+  "started_at": "2026-05-24T06:00:00.000Z",
+  "ended_at": "2026-05-24T06:35:00.000Z",
+  "distance_km": "5.20",
+  "duration_sec": 2100,
+  "avg_pace_sec": 403,
+  "min_pace_sec": 358,
+  "max_pace_sec": 450,
+  "start_lat": "13.7283000",
+  "start_lng": "100.5418000",
+  "end_lat": "13.7310000",
+  "end_lng": "100.5460000",
+  "overall_score": "78.50",
+  "grade": "good",
+  "heat_score": "72.00",
+  "air_quality_score": "80.00",
+  "uv_score": "75.00",
+  "wind_score": "85.00",
+  "humidity_score": "78.00",
+  "cloud_score": "82.00",
+  "calories_burned_kcal": 371
+}
+```
+
+---
+
+### 9. GET /api/v1/run/session/:id/route
+
+Route geometry + per-minute coordinate/pace/elevation points
+
+```bash
+curl "http://localhost:3000/api/v1/run/session/1/route" \
+  -H "Authorization: Bearer <your_access_token>"
+```
+
+**Response**
+```json
+{
+  "session_id": 1,
+  "route_geojson": null,
+  "route_polyline": null,
+  "route_geom": {
+    "type": "LineString",
+    "coordinates": [[100.5418, 13.7283], [100.5430, 13.7293], [100.5460, 13.7310]]
+  },
+  "coordinates": [
+    [13.7283, 100.5418],
+    [13.7292, 100.5432],
+    [13.7301, 100.5446],
+    [13.7310, 100.5460]
+  ],
+  "points": [
+    {
+      "id": 1,
+      "elapsed_sec": 0,
+      "recorded_at": "2026-05-24T06:00:00.000Z",
+      "lat": 13.7283,
+      "lng": 100.5418,
+      "distance_km": 0.0,
+      "current_pace_sec": null,
+      "elevation_m": 1.5
+    },
+    {
+      "id": 2,
+      "elapsed_sec": 700,
+      "recorded_at": "2026-05-24T06:11:40.000Z",
+      "lat": 13.7292,
+      "lng": 100.5432,
+      "distance_km": 1.73,
+      "current_pace_sec": 405,
+      "elevation_m": 1.5
+    }
+  ]
+}
+```
+
+> - `route_geom.coordinates` → lng/lat order (GeoJSON standard) — use with `google.maps.Polyline`
+> - `coordinates` → lat/lng order — use with Flutter Maps / Leaflet
+> - `points` → use to plot elevation profile or pace-over-distance graph
+
+---
+
+### 10. GET /api/v1/run/session/:id/env
+
+Env summary (auto-aggregated VIEW) + per-minute readings  
+Points now include `wind_direction`, `cloud_cover_pct`, `rain_probability`
+
+```bash
+curl "http://localhost:3000/api/v1/run/session/1/env" \
+  -H "Authorization: Bearer <your_access_token>"
+```
+
+**Response**
+```json
+{
+  "session_id": 1,
+  "summary": {
+    "avg_heat_index": "37.50",  "min_heat_index": "37.50",  "max_heat_index": "37.50",
+    "avg_feels_like": "37.50",  "min_feels_like": "37.50",  "max_feels_like": "37.50",
+    "avg_temperature": "31.20", "min_temperature": "31.20", "max_temperature": "31.20",
+    "avg_humidity": "74.00",    "min_humidity": "74.00",    "max_humidity": "74.00",
+    "avg_pm25": "24.50",        "min_pm25": "24.50",        "max_pm25": "24.50",
+    "avg_pm10": "38.00",        "min_pm10": "38.00",        "max_pm10": "38.00",
+    "avg_co": "0.420",          "min_co": "0.420",          "max_co": "0.420",
+    "avg_aqi": 75,              "min_aqi": 75,              "max_aqi": 75,
+    "avg_uv_index": "6.80",     "min_uv_index": "6.80",     "max_uv_index": "6.80",
+    "avg_wind_speed": "12.00",  "min_wind_speed": "12.00",  "max_wind_speed": "12.00",
+    "avg_cloud_cover_pct": null,"min_cloud_cover_pct": null,"max_cloud_cover_pct": null
+  },
+  "points": [
+    {
+      "id": 1,
+      "elapsed_sec": 0,
+      "recorded_at": "2026-05-24T06:00:00.000Z",
+      "temperature": "31.20",
+      "humidity": "74.00",
+      "feels_like": "37.50",
+      "aqi": 75,
+      "pm25": "24.50",
+      "pm10": "38.00",
+      "co": "0.420",
+      "uv_index": "6.80",
+      "wind_speed": "12.00",
+      "wind_direction": null,
+      "cloud_cover_pct": null,
+      "rain_probability": null
+    }
+  ]
+}
+```
+
+> `points` ordered by `elapsed_sec` — plot AQI/temperature/UV over run time
+
+---
+
+### 11. GET /api/v1/run/session/:id/biometric
+
+Biometric summary (auto-aggregated VIEW) + per-minute smartwatch readings
+
+```bash
+curl "http://localhost:3000/api/v1/run/session/1/biometric" \
+  -H "Authorization: Bearer <your_access_token>"
+```
+
+**Response**
+```json
+{
+  "session_id": 1,
+  "summary": {
+    "avg_heart_rate_bpm": 158,    "min_heart_rate_bpm": 132,    "max_heart_rate_bpm": 178,
+    "avg_blood_oxygen_pct": "98.20","min_blood_oxygen_pct": "96.00","max_blood_oxygen_pct": "99.50",
+    "avg_respiratory_rate_bpm": "26.50","min_respiratory_rate_bpm": "22.00","max_respiratory_rate_bpm": "32.00",
+    "avg_hrv_ms": "28.50",        "min_hrv_ms": "14.00",        "max_hrv_ms": "52.00",
+    "avg_cadence_spm": 168,       "min_cadence_spm": 155,       "max_cadence_spm": 178,
+    "calories_burned_kcal": 371,
+    "active_energy_kcal": 371,
+    "training_load": null,
+    "recovery_time_hr": null
+  },
+  "points": [
+    {
+      "id": 1,
+      "elapsed_sec": 0,
+      "recorded_at": "2026-05-24T06:00:00.000Z",
+      "heart_rate_bpm": 142,
+      "blood_oxygen_pct": "99.00",
+      "hrv_ms": "52.00",
+      "vo2max": "44.20",
+      "cadence_spm": 155,
+      "respiratory_rate_bpm": "22.00",
+      "calories_burned_kcal": "0.00"
+    },
+    {
+      "id": 2,
+      "elapsed_sec": 700,
+      "recorded_at": "2026-05-24T06:11:40.000Z",
+      "heart_rate_bpm": 165,
+      "blood_oxygen_pct": "97.50",
+      "hrv_ms": "22.00",
+      "vo2max": "50.10",
+      "cadence_spm": 171,
+      "respiratory_rate_bpm": "29.00",
+      "calories_burned_kcal": "248.50"
+    }
+  ]
+}
+```
+
+> `calories_burned_kcal` in points is **cumulative** — the last value equals the session total  
+> `training_load` and `recovery_time_hr` are `null` (not yet computed by the VIEW)
+
+---
+
+### 12. GET /api/v1/run/weekly
+
+7-day summary
+
+```bash
+curl http://localhost:3000/api/v1/run/weekly \
+  -H "Authorization: Bearer <your_access_token>"
+```
+
+**Response**
+```json
+{
+  "total_distance_km": 17.8,
+  "total_sessions": 3,
+  "avg_pace_sec": 387
+}
+```
+
+> Convert pace: `Math.floor(v/60) + ":" + (v%60).toString().padStart(2,"0")`
+
+---
+
+### 13. GET /api/v1/run/monthly
+
+Monthly summary — use when user changes month on the calendar
+
+| Query Param | Type | Required | Description |
+|-------------|------|----------|-------------|
+| `year` | number | Yes | ปี เช่น `2026` |
+| `month` | number | Yes | เดือน 1–12 |
+
+```bash
+curl "http://localhost:3000/api/v1/run/monthly?year=2026&month=5" \
+  -H "Authorization: Bearer <your_access_token>"
+```
+
+**Response**
+```json
+{
+  "total_distance_km": 38.1,
+  "total_sessions": 6,
+  "total_duration_sec": 15153,
+  "avg_pace_sec": 392,
+  "best_score": "91.00",
+  "avg_score": "77.27"
+}
+```
+
+---
+
+### 14. GET /api/v1/run/nearby
+
+ค้นหา sessions ที่ route ผ่านใกล้พิกัดที่กำหนด (PostGIS `ST_DWithin` บน `route_geom`)  
+`start_lat/lng` derive จาก `run_location_point` (จุดที่มี `elapsed_sec` น้อยสุด)
+
+| Query Param | Type | Required | Description |
+|-------------|------|----------|-------------|
+| `lat` | number | Yes | Latitude จุดอ้างอิง |
+| `lng` | number | Yes | Longitude จุดอ้างอิง |
+| `radius_km` | number | No | รัศมี กม. (default: 5) |
+| `limit` | number | No | จำนวนผลลัพธ์ (default: 10) |
+
+```bash
+curl "http://localhost:3000/api/v1/run/nearby?lat=13.7300&lng=100.5440&radius_km=2" \
+  -H "Authorization: Bearer <your_access_token>"
+```
+
+**Response**
+```json
+[
+  {
+    "id": 1,
+    "started_at": "2026-05-24T06:00:00.000Z",
+    "distance_km": "5.20",
+    "duration_sec": 2100,
+    "avg_pace_sec": 403,
+    "start_lat": "13.7283000",
+    "start_lng": "100.5418000",
+    "route_polyline": null,
+    "overall_score": "78.50",
+    "grade": "good",
+    "nearest_distance_km": "0.18"
+  }
+]
+```
+
+> `nearest_distance_km` = ระยะทางสั้นสุดจากจุดค้นหาถึงเส้น route (ไม่ใช่แค่ start point)
+
+---
+
+### 15. GET /api/v1/run/env  (Public)
+
+สภาพแวดล้อมปัจจุบัน ณ พิกัด — mock data (ไม่ต้อง token)
+
+| Query Param | Type | Required |
+|-------------|------|----------|
+| `lat` | number | Yes |
+| `lng` | number | Yes |
+
+```bash
+curl "http://localhost:3000/api/v1/run/env?lat=13.7283&lng=100.5418"
+```
+
+**Response**
+```json
+{
+  "lat": 13.7283,
+  "lng": 100.5418,
+  "temperature": 32.5,
+  "feels_like": 38.2,
+  "heat_index": 38.2,
+  "humidity": 72,
+  "pm25": 24.5,
+  "pm10": 38.0,
+  "co": 0.42,
+  "aqi": 75,
+  "uv_index": 7.2,
+  "wind_speed": 12.0,
+  "wind_direction": 180,
+  "cloud_cover_pct": 35,
+  "rain_probability": 20,
+  "recorded_at": "2026-05-25T10:00:00.000Z"
+}
+```
+
+---
+
+### 16. POST /api/v1/run/submit
+
+บันทึกข้อมูลการวิ่งแบบ batch — device เก็บข้อมูลทุก 1 นาที แล้วส่งทั้งหมดมาครั้งเดียวหลังวิ่งเสร็จ
+
+> **`watch_points` เป็น optional** — ละไว้หรือส่ง `[]` ถ้าไม่ได้ใส่ smartwatch  
+> ถ้าส่ง `watch_points` มา จำนวนต้องเท่ากับ `location_points` (1-to-1)  
+> `run_environment_summary` และ `run_smart_watch_summary` เป็น **VIEW** — server ไม่ต้อง insert แยก ค่าจะถูก aggregate อัตโนมัติจาก points ที่ insert
+
+**Body fields**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `started_at` | ISO datetime | Yes | เวลาเริ่มวิ่ง |
+| `ended_at` | ISO datetime | Yes | เวลาสิ้นสุด |
+| `duration_sec` | number | No | เวลารวม (วินาที) |
+| `avg_pace_sec` | number | No | Pace เฉลี่ย (วินาที/กม.) |
+| `min_pace_sec` | number | No | Pace เร็วสุด |
+| `max_pace_sec` | number | No | Pace ช้าสุด |
+| `route_polyline` | string | No | Google Encoded Polyline |
+| `location_points` | array | No | GPS + environment ทุก 1 นาที |
+| `watch_points` | array | No | Biometric จาก smartwatch ทุก 1 นาที — **optional**, ละไว้หรือส่ง `[]` ถ้าไม่มี smartwatch |
+
+> **Removed from v1:** `distance_km`, `start_lat`, `start_lng`, `end_lat`, `end_lng` — derive อัตโนมัติจาก `location_points`
+
+**`location_points[]` fields**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `elapsed_sec` | number | Yes | วินาทีนับจากเริ่มวิ่ง |
+| `recorded_at` | ISO datetime | Yes | เวลาที่บันทึก |
+| `lat` | number | Yes | Latitude |
+| `lng` | number | Yes | Longitude |
+| `distance_km` | number | No | ระยะสะสม ณ จุดนี้ |
+| `current_pace_sec` | number | No | Pace ณ จุดนี้ |
+| `elevation_m` | number | No | ความสูง (เมตร) |
+| `temperature` | number | No | อุณหภูมิ (°C) |
+| `humidity` | number | No | ความชื้น (%) |
+| `feels_like` | number | No | อุณหภูมิที่รู้สึก (°C) |
+| `aqi` | number | No | Air Quality Index |
+| `pm25` | number | No | PM2.5 (μg/m³) |
+| `pm10` | number | No | PM10 (μg/m³) |
+| `co` | number | No | CO (ppm) |
+| `uv_index` | number | No | UV Index |
+| `wind_speed` | number | No | ความเร็วลม (km/h) |
+| `wind_direction` | number | No | ทิศทางลม (degrees) **NEW** |
+| `cloud_cover_pct` | number | No | % เมฆปกคลุม **NEW** |
+| `rain_probability` | number | No | % โอกาสฝน **NEW** |
+
+**`watch_points[]` fields**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `elapsed_sec` | number | Yes | ต้องตรงกับ location_points |
+| `recorded_at` | ISO datetime | Yes | เวลาที่บันทึก |
+| `heart_rate_bpm` | number | No | อัตราการเต้นหัวใจ |
+| `blood_oxygen_pct` | number | No | SpO2 (%) |
+| `hrv_ms` | number | No | Heart Rate Variability (ms) |
+| `vo2max` | number | No | VO2 Max ณ จุดนี้ |
+| `cadence_spm` | number | No | ก้าว/นาที |
+| `respiratory_rate_bpm` | number | No | อัตราการหายใจ |
+| `calories_burned_kcal` | number | No | แคลอรี่สะสม (cumulative) |
+
+**ตัวอย่าง 1 — วิ่งพร้อม smartwatch**
+
+```bash
+curl -X POST http://localhost:3000/api/v1/run/submit \
+  -H "Authorization: Bearer <your_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "started_at": "2026-05-25T06:00:00.000Z",
+    "ended_at":   "2026-05-25T06:35:00.000Z",
+    "duration_sec": 2100,
+    "avg_pace_sec": 403,
+    "min_pace_sec": 358,
+    "max_pace_sec": 450,
+    "route_polyline": null,
+    "location_points": [
+      {
+        "elapsed_sec": 0, "recorded_at": "2026-05-25T06:00:00.000Z",
+        "lat": 13.7283, "lng": 100.5418,
+        "distance_km": 0.00, "current_pace_sec": null, "elevation_m": 1.5,
+        "temperature": 31.2, "humidity": 74.0, "feels_like": 37.5,
+        "aqi": 75, "pm25": 24.5, "pm10": 38.0, "co": 0.42,
+        "uv_index": 6.8, "wind_speed": 12.0, "wind_direction": 180,
+        "cloud_cover_pct": 35, "rain_probability": 20
+      },
+      {
+        "elapsed_sec": 700, "recorded_at": "2026-05-25T06:11:40.000Z",
+        "lat": 13.7292, "lng": 100.5432,
+        "distance_km": 1.73, "current_pace_sec": 405, "elevation_m": 1.5,
+        "temperature": 31.2, "humidity": 74.0, "feels_like": 37.5,
+        "aqi": 75, "pm25": 24.5, "pm10": 38.0, "co": 0.42,
+        "uv_index": 6.8, "wind_speed": 12.0, "wind_direction": 180,
+        "cloud_cover_pct": 35, "rain_probability": 20
+      }
+    ],
+    "watch_points": [
+      {
+        "elapsed_sec": 0, "recorded_at": "2026-05-25T06:00:00.000Z",
+        "heart_rate_bpm": 142, "blood_oxygen_pct": 99.0,
+        "hrv_ms": 52.0, "vo2max": 44.2,
+        "cadence_spm": 155, "respiratory_rate_bpm": 22.0,
+        "calories_burned_kcal": 0.0
+      },
+      {
+        "elapsed_sec": 700, "recorded_at": "2026-05-25T06:11:40.000Z",
+        "heart_rate_bpm": 165, "blood_oxygen_pct": 97.5,
+        "hrv_ms": 22.0, "vo2max": 50.1,
+        "cadence_spm": 171, "respiratory_rate_bpm": 29.0,
+        "calories_burned_kcal": 248.5
+      }
+    ]
+  }'
+```
+
+**ตัวอย่าง 2 — วิ่งโดยไม่มี smartwatch** (ละ `watch_points` ได้เลย)
+
+```bash
+curl -X POST http://localhost:3000/api/v1/run/submit \
+  -H "Authorization: Bearer <your_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "started_at": "2026-05-25T06:00:00.000Z",
+    "ended_at":   "2026-05-25T06:35:00.000Z",
+    "duration_sec": 2100,
+    "avg_pace_sec": 403,
+    "location_points": [
+      {
+        "elapsed_sec": 0, "recorded_at": "2026-05-25T06:00:00.000Z",
+        "lat": 13.7283, "lng": 100.5418,
+        "distance_km": 0.00, "elevation_m": 1.5,
+        "temperature": 31.2, "humidity": 74.0, "aqi": 75
+      },
+      {
+        "elapsed_sec": 700, "recorded_at": "2026-05-25T06:11:40.000Z",
+        "lat": 13.7292, "lng": 100.5432,
+        "distance_km": 1.73, "current_pace_sec": 405, "elevation_m": 1.5,
+        "temperature": 31.2, "humidity": 74.0, "aqi": 75
+      }
+    ]
+  }'
+```
+
+**Response** `201 Created`
+```json
+{ "session_id": 11 }
+```
+
+**Server auto-derives:**
+- `route_geom` (PostGIS LineString) — built from `location_points[].lat/lng`
+- `run_environment_summary` VIEW — aggregates from the inserted `run_location_point` rows
+- `run_smart_watch_summary` VIEW — aggregates from the inserted `run_watch_point` rows
+
+---
+
+## Error Responses
+
+| Status | Body | Cause |
+|--------|------|-------|
+| `400` | `{ "message": "lat and lng are required" }` | Missing query params |
+| `400` | `{ "message": "location_points and watch_points must have the same length" }` | Array length mismatch |
+| `400` | `{ "message": "year and month are required" }` | Missing monthly params |
+| `401` | `{ "message": "Invalid email or password" }` | Email not found |
+| `401` | `{ "message": "Invalid refresh token" }` | Token expired or invalid |
+| `404` | `{ "message": "Session not found" }` | Session does not exist or not owned by user |
+| `404` | `{ "message": "User not found" }` | User not found |
+| `500` | `{ "message": "..." }` | Server / DB error |

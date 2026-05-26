@@ -1,0 +1,8 @@
+งานปัจจุบัน คือต้องทำ api ตาม C:\Users\GISDA\Documents\Flood\mockup_run_api\apilist.txt
+
+แต่งานนี้ไม่ต้องนี้เราไม่ต้องทำระบบ authen เพราะ ฉะนั้น แค่ทำ api ตัวอื่น แล้วมี middle ware ปลอมๆ 
+
+ที่ไปเรียก user_id 1 มาแสดงข้อมูล
+
+
+
