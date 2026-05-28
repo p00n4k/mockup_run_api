@@ -1,31 +1,24 @@
-// ── index.js — Flood Run API (v3, db_v3 schema) ─────────────────────────────
-// Schema changes vs v2:
-//   * run_environment_summary  : VIEW → TABLE
-//   * run_smart_watch_summary  : VIEW → TABLE
-//   * Both summary tables populated on POST /run/submit (single transaction)
+﻿// ── index.js — Flood Run API (v2, new_db schema) ─────────────────────────────
+// Schema changes vs v1:
+//   run_sessions      : removed distance_km, start_lat, start_lng, end_lat, end_lng
+//   run_environment_summary : now a VIEW — no INSERT, derived from run_location_point
+//   run_smart_watch_summary : now a VIEW in identity schema — no INSERT
+//   run_location_point: added wind_direction, cloud_cover_pct, rain_probability
 // ─────────────────────────────────────────────────────────────────────────────
 const express = require("express");
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const { Pool } = require("pg");
-const swaggerUi = require("swagger-ui-express");
-const swaggerDocument = require("./swagger");
 require("dotenv").config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ── Swagger UI ────────────────────────────────────────────────────────────────
-app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
-
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
-// บังคับให้ทุก connection ใช้ Asia/Bangkok — ป้องกัน timestamp shift
-pool.on("connect", (client) => {
-  client.query("SET TIME ZONE 'Asia/Bangkok'");
-});
-
+// ── Dev bypass ───────────────────────────────────────────────────────────────
+// In dev mode auth middleware sets user_id = 1 — no real token needed.
 const DEV_USER_ID = 1;
 
 function createAccessToken(user) {
@@ -47,34 +40,6 @@ function createRefreshToken(user) {
 function auth(req, res, next) {
   req.user = { id: DEV_USER_ID };
   next();
-}
-
-// ── helpers ──────────────────────────────────────────────────────────────────
-
-function avgOf(arr, key) {
-  const vals = arr.map((x) => x[key]).filter((v) => v !== null && v !== undefined);
-  return vals.length ? vals.reduce((s, v) => s + Number(v), 0) / vals.length : null;
-}
-function minOf(arr, key) {
-  const vals = arr.map((x) => x[key]).filter((v) => v !== null && v !== undefined).map(Number);
-  return vals.length ? Math.min(...vals) : null;
-}
-function maxOf(arr, key) {
-  const vals = arr.map((x) => x[key]).filter((v) => v !== null && v !== undefined).map(Number);
-  return vals.length ? Math.max(...vals) : null;
-}
-function roundOrNull(v, dp = 2) {
-  if (v === null || v === undefined) return null;
-  return Number(Number(v).toFixed(dp));
-}
-
-function getMET(speedKmh) {
-  if (speedKmh >= 12) return 12;
-  if (speedKmh >= 10) return 10;
-  if (speedKmh >= 8)  return 8;
-  if (speedKmh >= 5)  return 6;
-  if (speedKmh >= 3)  return 3;
-  return 2; // เดินช้า/อยู่กับที่ — MET ของกิจกรรมเบาที่สุด
 }
 
 // ── AUTH ─────────────────────────────────────────────────────────────────────
@@ -124,7 +89,7 @@ app.post("/api/v1/auth/logout", auth, (req, res) => {
   return res.json({ message: "Logged out successfully" });
 });
 
-// ── USER ─────────────────────────────────────────────────────────────────────
+// ── USER ──────────────────────────────────────────────────────────────────────
 
 app.get("/api/v1/users/me", auth, async (req, res) => {
   try {
@@ -255,8 +220,14 @@ app.post("/api/v1/users/me/profile", auth, async (req, res) => {
   }
 });
 
-// ── RUN ──────────────────────────────────────────────────────────────────────
+// ── RUN ───────────────────────────────────────────────────────────────────────
+// NOTE: distance_km, start_lat/lng, end_lat/lng are no longer stored in
+// run_sessions — they are derived from run_location_point via lateral joins.
 
+/**
+ * GET /api/v1/run/session_history
+ * Query: startDate, endDate, page, limit, offset
+ */
 app.get("/api/v1/run/session_history", auth, async (req, res) => {
   try {
     const { startDate, endDate, page, limit = 10, offset: rawOffset } = req.query;
@@ -276,10 +247,14 @@ app.get("/api/v1/run/session_history", auth, async (req, res) => {
     const result = await pool.query(
       `
       SELECT
-        rs.id, rs.started_at, rs.ended_at,
+        rs.id,
+        rs.started_at,
+        rs.ended_at,
         lp_agg.distance_km,
-        rs.duration_sec, rs.avg_pace_sec,
-        res.overall_score, res.grade
+        rs.duration_sec,
+        rs.avg_pace_sec,
+        res.overall_score,
+        res.grade
       FROM running.run_sessions rs
       LEFT JOIN LATERAL (
         SELECT MAX(lp.distance_km) AS distance_km
@@ -300,19 +275,35 @@ app.get("/api/v1/run/session_history", auth, async (req, res) => {
   }
 });
 
+/**
+ * GET /api/v1/run/session/:id
+ * Session overview: basic stats + environment scores
+ */
 app.get("/api/v1/run/session/:id", auth, async (req, res) => {
   try {
     const result = await pool.query(
       `
       SELECT
-        rs.id, rs.started_at, rs.ended_at,
+        rs.id,
+        rs.started_at,
+        rs.ended_at,
         lp_agg.distance_km,
-        rs.duration_sec, rs.avg_pace_sec, rs.min_pace_sec, rs.max_pace_sec,
-        lp_first.lat AS start_lat, lp_first.lng AS start_lng,
-        lp_last.lat  AS end_lat,   lp_last.lng  AS end_lng,
-        res.overall_score, res.grade,
-        res.heat_score, res.air_quality_score, res.uv_score,
-        res.wind_score, res.humidity_score, res.cloud_score,
+        rs.duration_sec,
+        rs.avg_pace_sec,
+        rs.min_pace_sec,
+        rs.max_pace_sec,
+        lp_first.lat AS start_lat,
+        lp_first.lng AS start_lng,
+        lp_last.lat  AS end_lat,
+        lp_last.lng  AS end_lng,
+        res.overall_score,
+        res.grade,
+        res.heat_score,
+        res.air_quality_score,
+        res.uv_score,
+        res.wind_score,
+        res.humidity_score,
+        res.cloud_score,
         res.calories_burned_kcal
       FROM running.run_sessions rs
       LEFT JOIN LATERAL (
@@ -343,6 +334,10 @@ app.get("/api/v1/run/session/:id", auth, async (req, res) => {
   }
 });
 
+/**
+ * GET /api/v1/run/session/:id/route
+ * Route geometry + per-minute coordinate/pace/elevation points
+ */
 app.get("/api/v1/run/session/:id/route", auth, async (req, res) => {
   try {
     const sessionResult = await pool.query(
@@ -370,7 +365,6 @@ app.get("/api/v1/run/session/:id/route", auth, async (req, res) => {
     );
 
     const session = sessionResult.rows[0];
-    console.log(`[session/${req.params.id}/route] route_polyline sent:`, session.route_polyline);
     return res.json({
       session_id: session.id,
       route_geojson: session.route_geojson,
@@ -394,6 +388,11 @@ app.get("/api/v1/run/session/:id/route", auth, async (req, res) => {
   }
 });
 
+/**
+ * GET /api/v1/run/session/:id/env
+ * Environment summary (VIEW) + per-minute env readings
+ * Includes wind_direction, cloud_cover_pct, rain_probability per point
+ */
 app.get("/api/v1/run/session/:id/env", auth, async (req, res) => {
   try {
     const ownerCheck = await pool.query(
@@ -451,6 +450,10 @@ app.get("/api/v1/run/session/:id/env", auth, async (req, res) => {
   }
 });
 
+/**
+ * GET /api/v1/run/session/:id/biometric
+ * Smartwatch summary (VIEW) + per-minute biometric readings
+ */
 app.get("/api/v1/run/session/:id/biometric", auth, async (req, res) => {
   try {
     const ownerCheck = await pool.query(
@@ -469,9 +472,11 @@ app.get("/api/v1/run/session/:id/biometric", auth, async (req, res) => {
           avg_blood_oxygen_pct,     min_blood_oxygen_pct,     max_blood_oxygen_pct,
           avg_respiratory_rate_bpm, min_respiratory_rate_bpm, max_respiratory_rate_bpm,
           avg_hrv_ms,               min_hrv_ms,               max_hrv_ms,
-          avg_cadence_spm,          min_cadence_spm,          max_cadence_spm,
-          calories_burned_kcal, active_energy_kcal,
-          training_load, recovery_time_hr
+          avg_cadence_spm,          min_cadence_spm,           max_cadence_spm,
+          calories_burned_kcal,
+          active_energy_kcal,
+          training_load,
+          recovery_time_hr
         FROM identity.run_smart_watch_summary
         WHERE session_id = $1
         LIMIT 1
@@ -505,127 +510,9 @@ app.get("/api/v1/run/session/:id/biometric", auth, async (req, res) => {
   }
 });
 
-// helper: shape a joined location+watch row into the grouped point response
-function shapePointRow(r) {
-  if (!r) return null;
-  const biometric =
-    r.heart_rate_bpm === null &&
-    r.blood_oxygen_pct === null &&
-    r.hrv_ms === null &&
-    r.vo2max === null &&
-    r.cadence_spm === null &&
-    r.respiratory_rate_bpm === null &&
-    r.calories_burned_kcal === null
-      ? null
-      : {
-          heart_rate_bpm:       r.heart_rate_bpm,
-          blood_oxygen_pct:     r.blood_oxygen_pct     !== null ? parseFloat(r.blood_oxygen_pct)     : null,
-          hrv_ms:               r.hrv_ms               !== null ? parseFloat(r.hrv_ms)               : null,
-          vo2max:               r.vo2max               !== null ? parseFloat(r.vo2max)               : null,
-          cadence_spm:          r.cadence_spm,
-          respiratory_rate_bpm: r.respiratory_rate_bpm !== null ? parseFloat(r.respiratory_rate_bpm) : null,
-          calories_burned_kcal: r.calories_burned_kcal !== null ? parseFloat(r.calories_burned_kcal) : null,
-        };
-
-  return {
-    point_id: r.id,
-    elapsed_sec: r.elapsed_sec,
-    recorded_at: r.recorded_at,
-    location: {
-      lat:              r.lat              !== null ? parseFloat(r.lat)              : null,
-      lng:              r.lng              !== null ? parseFloat(r.lng)              : null,
-      elevation_m:      r.elevation_m      !== null ? parseFloat(r.elevation_m)      : null,
-      distance_km:      r.distance_km      !== null ? parseFloat(r.distance_km)      : null,
-      current_pace_sec: r.current_pace_sec,
-    },
-    environment: {
-      temperature:      r.temperature      !== null ? parseFloat(r.temperature)      : null,
-      feels_like:       r.feels_like       !== null ? parseFloat(r.feels_like)       : null,
-      humidity:         r.humidity         !== null ? parseFloat(r.humidity)         : null,
-      aqi:              r.aqi,
-      pm25:             r.pm25             !== null ? parseFloat(r.pm25)             : null,
-      pm10:             r.pm10             !== null ? parseFloat(r.pm10)             : null,
-      co:               r.co               !== null ? parseFloat(r.co)               : null,
-      uv_index:         r.uv_index         !== null ? parseFloat(r.uv_index)         : null,
-      wind_speed:       r.wind_speed       !== null ? parseFloat(r.wind_speed)       : null,
-      wind_direction:   r.wind_direction   !== null ? parseFloat(r.wind_direction)   : null,
-      cloud_cover_pct:  r.cloud_cover_pct  !== null ? parseFloat(r.cloud_cover_pct)  : null,
-      rain_probability: r.rain_probability !== null ? parseFloat(r.rain_probability) : null,
-    },
-    biometric,
-  };
-}
-
-const POINT_SELECT_SQL = `
-  SELECT
-    lp.id, lp.elapsed_sec, lp.recorded_at,
-    lp.lat, lp.lng, lp.elevation_m, lp.distance_km, lp.current_pace_sec,
-    lp.temperature, lp.humidity, lp.feels_like,
-    lp.aqi, lp.pm25, lp.pm10, lp.co, lp.uv_index,
-    lp.wind_speed, lp.wind_direction, lp.cloud_cover_pct, lp.rain_probability,
-    wp.heart_rate_bpm, wp.blood_oxygen_pct, wp.hrv_ms, wp.vo2max,
-    wp.cadence_spm, wp.respiratory_rate_bpm, wp.calories_burned_kcal
-  FROM running.run_location_point lp
-  JOIN running.run_sessions s ON s.id = lp.session_id
-  LEFT JOIN running.run_watch_point wp ON wp.location_point_id = lp.id
-`;
-
-// GET /api/v1/run/session/:id/point/:point_id — single point (location + env + biometric)
-app.get("/api/v1/run/session/:id/point/:point_id", auth, async (req, res) => {
-  try {
-    const result = await pool.query(
-      `${POINT_SELECT_SQL}
-       WHERE lp.id = $1 AND s.id = $2 AND s.user_id = $3
-       LIMIT 1`,
-      [req.params.point_id, req.params.id, req.user.id]
-    );
-    if (result.rows.length === 0) {
-      return res.status(404).json({ message: "Point not found" });
-    }
-    return res.json({
-      session_id: parseInt(req.params.id),
-      ...shapePointRow(result.rows[0]),
-    });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ message: "Failed to get point" });
-  }
-});
-
-// GET /api/v1/run/session/:id/points?ids=15,28 — multiple points in one call
-app.get("/api/v1/run/session/:id/points", auth, async (req, res) => {
-  try {
-    const idsParam = (req.query.ids || "").toString().trim();
-    if (!idsParam) {
-      return res.status(400).json({ message: "Query param 'ids' is required (e.g. ?ids=15,28)" });
-    }
-    const ids = idsParam
-      .split(",")
-      .map((s) => parseInt(s.trim(), 10))
-      .filter((n) => Number.isInteger(n) && n > 0);
-    if (ids.length === 0) {
-      return res.status(400).json({ message: "No valid point ids in 'ids' param" });
-    }
-
-    const result = await pool.query(
-      `${POINT_SELECT_SQL}
-       WHERE lp.id = ANY($1::bigint[]) AND s.id = $2 AND s.user_id = $3
-       ORDER BY lp.elapsed_sec`,
-      [ids, req.params.id, req.user.id]
-    );
-
-    return res.json({
-      session_id: parseInt(req.params.id),
-      requested_ids: ids,
-      count: result.rows.length,
-      points: result.rows.map(shapePointRow),
-    });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ message: "Failed to get points" });
-  }
-});
-
+/**
+ * GET /api/v1/run/weekly
+ */
 app.get("/api/v1/run/weekly", auth, async (req, res) => {
   try {
     const result = await pool.query(
@@ -651,6 +538,10 @@ app.get("/api/v1/run/weekly", auth, async (req, res) => {
   }
 });
 
+/**
+ * GET /api/v1/run/monthly
+ * Query: year, month (1-12)
+ */
 app.get("/api/v1/run/monthly", auth, async (req, res) => {
   try {
     const { year, month } = req.query;
@@ -685,6 +576,10 @@ app.get("/api/v1/run/monthly", auth, async (req, res) => {
   }
 });
 
+/**
+ * GET /api/v1/run/nearby
+ * Query: lat, lng, radius_km (default 5), limit (default 10)
+ */
 app.get("/api/v1/run/nearby", auth, async (req, res) => {
   try {
     const { lat, lng, radius_km = 5, limit = 10 } = req.query;
@@ -695,11 +590,16 @@ app.get("/api/v1/run/nearby", auth, async (req, res) => {
     const result = await pool.query(
       `
       SELECT
-        rs.id, rs.started_at,
-        lp_agg.distance_km, rs.duration_sec, rs.avg_pace_sec,
-        lp_first.lat AS start_lat, lp_first.lng AS start_lng,
+        rs.id,
+        rs.started_at,
+        lp_agg.distance_km,
+        rs.duration_sec,
+        rs.avg_pace_sec,
+        lp_first.lat AS start_lat,
+        lp_first.lng AS start_lng,
         rs.route_polyline,
-        res.overall_score, res.grade,
+        res.overall_score,
+        res.grade,
         ROUND((ST_Distance(
           rs.route_geom::geography,
           ST_SetSRID(ST_MakePoint($2::float, $1::float), 4326)::geography
@@ -726,8 +626,6 @@ app.get("/api/v1/run/nearby", auth, async (req, res) => {
       `,
       [parseFloat(lat), parseFloat(lng), parseFloat(radius_km), req.user.id, parseInt(limit)]
     );
-    console.log("[run/nearby] route_polylines sent:",
-      result.rows.map((r) => ({ id: r.id, route_polyline: r.route_polyline })));
     return res.json(result.rows);
   } catch (err) {
     console.error(err);
@@ -735,6 +633,10 @@ app.get("/api/v1/run/nearby", auth, async (req, res) => {
   }
 });
 
+/**
+ * GET /api/v1/run/env  (Public)
+ * Mock environment data for a given lat/lng
+ */
 app.get("/api/v1/run/env", async (req, res) => {
   const { lat, lng } = req.query;
   if (!lat || !lng) {
@@ -743,11 +645,19 @@ app.get("/api/v1/run/env", async (req, res) => {
   return res.json({
     lat: parseFloat(lat),
     lng: parseFloat(lng),
-    temperature: 32.5, feels_like: 38.2, heat_index: 38.2,
-    humidity: 72, pm25: 24.5, pm10: 38.0, co: 0.42,
-    aqi: 75, uv_index: 7.2,
-    wind_speed: 12.0, wind_direction: 180,
-    cloud_cover_pct: 35, rain_probability: 20,
+    temperature: 32.5,
+    feels_like: 38.2,
+    heat_index: 38.2,
+    humidity: 72,
+    pm25: 24.5,
+    pm10: 38.0,
+    co: 0.42,
+    aqi: 75,
+    uv_index: 7.2,
+    wind_speed: 12.0,
+    wind_direction: 180,
+    cloud_cover_pct: 35,
+    rain_probability: 20,
     recorded_at: new Date().toISOString(),
   });
 });
@@ -755,26 +665,25 @@ app.get("/api/v1/run/env", async (req, res) => {
 /**
  * POST /api/v1/run/submit
  *
- * Transaction order:
- *   1. INSERT run_sessions
- *   2. INSERT run_location_point (batch)
- *   3. INSERT run_watch_point    (batch, optional)
- *   4. INSERT run_environment_summary  (computed from location_points)
- *   5. INSERT run_smart_watch_summary  (computed from watch_points, optional)
- *   6. INSERT run_scores               (MET-based calories + overall score)
+ * Device sends all data in one request when the run finishes.
+ * watch_points is optional (omit or send [] if no smartwatch).
+ * If provided, watch_points must have the same length as location_points (1-to-1).
+ *
+ * run_environment_summary and run_smart_watch_summary are VIEWs — no manual
+ * insert needed; they auto-aggregate from run_location_point / run_watch_point.
  */
 app.post("/api/v1/run/submit", auth, async (req, res) => {
   const {
-    started_at, ended_at,
-    duration_sec, avg_pace_sec, min_pace_sec, max_pace_sec,
+    started_at,
+    ended_at,
+    duration_sec,
+    avg_pace_sec,
+    min_pace_sec,
+    max_pace_sec,
     route_polyline,
-    route_coordinates,   // [[lng, lat], ...] — สร้าง route_geom จากตัวนี้ตรง ๆ
     location_points = [],
     watch_points = [],
   } = req.body;
-
-  console.log("[submit] route_polyline received:", route_polyline);
-  console.log("[submit] route_coordinates length:", route_coordinates?.length ?? 0);
 
   const hasWatchData = watch_points.length > 0;
   if (hasWatchData && watch_points.length !== location_points.length) {
@@ -787,38 +696,23 @@ app.post("/api/v1/run/submit", auth, async (req, res) => {
   try {
     await client.query("BEGIN");
 
-    // 1. require weight before doing anything else
-    const profileResult = await client.query(
-      `SELECT weight_kg FROM identity.user_profiles WHERE user_id = $1`,
-      [req.user.id]
-    );
-    const weightKg = parseFloat(profileResult.rows[0]?.weight_kg);
-    if (!weightKg) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({
-        message: "User weight is required. Please update your profile before submitting a run.",
-      });
-    }
-
-    // 2. INSERT run_sessions
+    // ── 1. INSERT run_sessions ────────────────────────────────────────────────
+    // distance_km / start_lat / end_lat no longer stored — derived from points.
     const sessionParams = [
-      req.user.id, started_at, ended_at,
-      duration_sec ?? null, avg_pace_sec ?? null,
-      min_pace_sec ?? null, max_pace_sec ?? null,
-      route_polyline ?? null,
+      req.user.id,            // $1
+      started_at,             // $2
+      ended_at,               // $3
+      duration_sec ?? null,   // $4
+      avg_pace_sec ?? null,   // $5
+      min_pace_sec ?? null,   // $6
+      max_pace_sec ?? null,   // $7
+      route_polyline ?? null, // $8
     ];
 
-    // ใช้ route_coordinates จาก client ก่อน — fallback เป็น location_points ถ้าไม่ส่งมา
     let routeGeomClause = "NULL";
-    const geomSource = Array.isArray(route_coordinates) && route_coordinates.length >= 2
-      ? route_coordinates.map(([lng, lat]) => `${lng} ${lat}`)
-      : (location_points.length >= 2
-          ? location_points.map((p) => `${p.lng} ${p.lat}`)
-          : null);
-
-    if (geomSource) {
-      const wkt = "LINESTRING(" + geomSource.join(",") + ")";
-      sessionParams.push(wkt);
+    if (location_points.length >= 2) {
+      const wkt = "LINESTRING(" + location_points.map((p) => `${p.lng} ${p.lat}`).join(",") + ")";
+      sessionParams.push(wkt); // $9
       routeGeomClause = "ST_GeomFromText($9, 4326)";
     }
 
@@ -835,8 +729,7 @@ app.post("/api/v1/run/submit", auth, async (req, res) => {
     );
     const sessionId = sessionResult.rows[0].id;
 
-    // 3. INSERT run_location_point
-    let locationPointIds = [];
+    // ── 2. INSERT run_location_point (batch via unnest) ───────────────────────
     if (location_points.length > 0) {
       const locInsertResult = await client.query(
         `
@@ -895,10 +788,10 @@ app.post("/api/v1/run/submit", auth, async (req, res) => {
           location_points.map((p) => p.rain_probability ?? null),
         ]
       );
-      locationPointIds = locInsertResult.rows.map((r) => r.id);
 
-      // 4. INSERT run_watch_point (optional)
-      if (hasWatchData) {
+      // ── 3. INSERT run_watch_point (batch via unnest, 1-to-1) ─────────────────
+      if (watch_points.length > 0) {
+        const locationPointIds = locInsertResult.rows.map((r) => r.id);
         await client.query(
           `
           INSERT INTO running.run_watch_point (
@@ -934,97 +827,31 @@ app.post("/api/v1/run/submit", auth, async (req, res) => {
           ]
         );
       }
-
-      // 5. INSERT run_environment_summary  (computed from location_points)
-      await client.query(
-        `
-        INSERT INTO running.run_environment_summary (
-          session_id,
-          avg_heat_index,  min_heat_index,  max_heat_index,
-          avg_feels_like,  min_feels_like,  max_feels_like,
-          avg_temperature, min_temperature, max_temperature,
-          avg_humidity,    min_humidity,    max_humidity,
-          avg_pm25,        min_pm25,        max_pm25,
-          avg_pm10,        min_pm10,        max_pm10,
-          avg_co,          min_co,          max_co,
-          avg_aqi,         min_aqi,         max_aqi,
-          avg_uv_index,    min_uv_index,    max_uv_index,
-          avg_wind_speed,  min_wind_speed,  max_wind_speed,
-          avg_cloud_cover_pct, min_cloud_cover_pct, max_cloud_cover_pct
-        ) VALUES (
-          $1,
-          $2,  $3,  $4,
-          $5,  $6,  $7,
-          $8,  $9,  $10,
-          $11, $12, $13,
-          $14, $15, $16,
-          $17, $18, $19,
-          $20, $21, $22,
-          $23, $24, $25,
-          $26, $27, $28,
-          $29, $30, $31,
-          $32, $33, $34
-        )
-        `,
-        [
-          sessionId,
-          roundOrNull(avgOf(location_points, "feels_like"),  2), roundOrNull(minOf(location_points, "feels_like"),  2), roundOrNull(maxOf(location_points, "feels_like"),  2),
-          roundOrNull(avgOf(location_points, "feels_like"),  2), roundOrNull(minOf(location_points, "feels_like"),  2), roundOrNull(maxOf(location_points, "feels_like"),  2),
-          roundOrNull(avgOf(location_points, "temperature"), 2), roundOrNull(minOf(location_points, "temperature"), 2), roundOrNull(maxOf(location_points, "temperature"), 2),
-          roundOrNull(avgOf(location_points, "humidity"),    2), roundOrNull(minOf(location_points, "humidity"),    2), roundOrNull(maxOf(location_points, "humidity"),    2),
-          roundOrNull(avgOf(location_points, "pm25"),        2), roundOrNull(minOf(location_points, "pm25"),        2), roundOrNull(maxOf(location_points, "pm25"),        2),
-          roundOrNull(avgOf(location_points, "pm10"),        2), roundOrNull(minOf(location_points, "pm10"),        2), roundOrNull(maxOf(location_points, "pm10"),        2),
-          roundOrNull(avgOf(location_points, "co"),          3), roundOrNull(minOf(location_points, "co"),          3), roundOrNull(maxOf(location_points, "co"),          3),
-          avgOf(location_points, "aqi") !== null ? Math.round(avgOf(location_points, "aqi")) : null, minOf(location_points, "aqi"), maxOf(location_points, "aqi"),
-          roundOrNull(avgOf(location_points, "uv_index"),    2), roundOrNull(minOf(location_points, "uv_index"),    2), roundOrNull(maxOf(location_points, "uv_index"),    2),
-          roundOrNull(avgOf(location_points, "wind_speed"),  2), roundOrNull(minOf(location_points, "wind_speed"),  2), roundOrNull(maxOf(location_points, "wind_speed"),  2),
-          roundOrNull(avgOf(location_points, "cloud_cover_pct"), 2), roundOrNull(minOf(location_points, "cloud_cover_pct"), 2), roundOrNull(maxOf(location_points, "cloud_cover_pct"), 2),
-        ]
-      );
-
-      // 6. INSERT run_smart_watch_summary  (computed from watch_points, optional)
-      if (hasWatchData) {
-        const avgHr   = avgOf(watch_points, "heart_rate_bpm");
-        const avgCad  = avgOf(watch_points, "cadence_spm");
-        const maxCal  = maxOf(watch_points, "calories_burned_kcal");
-
-        await client.query(
-          `
-          INSERT INTO identity.run_smart_watch_summary (
-            session_id,
-            avg_heart_rate_bpm,       min_heart_rate_bpm,       max_heart_rate_bpm,
-            avg_blood_oxygen_pct,     min_blood_oxygen_pct,     max_blood_oxygen_pct,
-            avg_respiratory_rate_bpm, min_respiratory_rate_bpm, max_respiratory_rate_bpm,
-            avg_hrv_ms,               min_hrv_ms,               max_hrv_ms,
-            avg_cadence_spm,          min_cadence_spm,          max_cadence_spm,
-            calories_burned_kcal, active_energy_kcal,
-            training_load, recovery_time_hr
-          ) VALUES (
-            $1,
-            $2,  $3,  $4,
-            $5,  $6,  $7,
-            $8,  $9,  $10,
-            $11, $12, $13,
-            $14, $15, $16,
-            $17, $18, $19, $20
-          )
-          `,
-          [
-            sessionId,
-            avgHr !== null ? Math.round(avgHr) : null, minOf(watch_points, "heart_rate_bpm"), maxOf(watch_points, "heart_rate_bpm"),
-            roundOrNull(avgOf(watch_points, "blood_oxygen_pct"),     2), roundOrNull(minOf(watch_points, "blood_oxygen_pct"),     2), roundOrNull(maxOf(watch_points, "blood_oxygen_pct"),     2),
-            roundOrNull(avgOf(watch_points, "respiratory_rate_bpm"), 2), roundOrNull(minOf(watch_points, "respiratory_rate_bpm"), 2), roundOrNull(maxOf(watch_points, "respiratory_rate_bpm"), 2),
-            roundOrNull(avgOf(watch_points, "hrv_ms"),               2), roundOrNull(minOf(watch_points, "hrv_ms"),               2), roundOrNull(maxOf(watch_points, "hrv_ms"),               2),
-            avgCad !== null ? Math.round(avgCad) : null, minOf(watch_points, "cadence_spm"), maxOf(watch_points, "cadence_spm"),
-            maxCal !== null ? Math.round(maxCal) : null,
-            maxCal !== null ? Math.round(maxCal) : null,
-            null, null,
-          ]
-        );
-      }
+      // run_environment_summary and run_smart_watch_summary are VIEWs —
+      // they auto-aggregate from the rows just inserted above.
     }
 
-    // 7. INSERT run_scores  (MET-based calories + overall score)
+    // ── 4. คำนวณ run_scores ──────────────────────────────────────────────────
+    // calories จาก MET × weight × duration (ต่อ interval ระหว่าง points)
+    const profileResult = await client.query(
+      `SELECT weight_kg FROM identity.user_profiles WHERE user_id = $1`,
+      [req.user.id]
+    );
+    const weightKg = parseFloat(profileResult.rows[0]?.weight_kg);
+    if (!weightKg) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "User weight is required. Please update your profile before submitting a run." });
+    }
+
+    function getMET(speedKmh) {
+      if (speedKmh >= 12) return 12;
+      if (speedKmh >= 10) return 10;
+      if (speedKmh >= 8)  return 8;
+      if (speedKmh >= 5)  return 6;
+      if (speedKmh >= 3)  return 3;
+      return 0;
+    }
+
     let totalCalories = 0;
     for (let i = 1; i < location_points.length; i++) {
       const prev = location_points[i - 1];
@@ -1032,14 +859,17 @@ app.post("/api/v1/run/submit", auth, async (req, res) => {
       const intervalSec = (curr.elapsed_sec ?? 0) - (prev.elapsed_sec ?? 0);
       const distKm = (curr.distance_km ?? 0) - (prev.distance_km ?? 0);
       const speedKmh = intervalSec > 0 ? (distKm / intervalSec) * 3600 : 0;
-      totalCalories += getMET(speedKmh) * weightKg * (intervalSec / 3600);
+      const met = getMET(speedKmh);
+      totalCalories += met * weightKg * (intervalSec / 3600);
     }
     totalCalories = Math.round(totalCalories);
 
-    const avgPm25 = avgOf(location_points, "pm25") ?? 0;
-    const avgHeatIndex = avgOf(location_points, "feels_like")
-      ?? avgOf(location_points, "temperature")
-      ?? 30;
+    const avgPm25 = location_points.length > 0
+      ? location_points.reduce((s, p) => s + (p.pm25 ?? 0), 0) / location_points.length
+      : 0;
+    const avgHeatIndex = location_points.length > 0
+      ? location_points.reduce((s, p) => s + (p.feels_like ?? p.temperature ?? 30), 0) / location_points.length
+      : 30;
 
     const activityScore = Math.min(70, totalCalories * 0.2);
     const pmScore      = Math.max(0, 20 - avgPm25 * 0.4);
@@ -1061,12 +891,7 @@ app.post("/api/v1/run/submit", auth, async (req, res) => {
     );
 
     await client.query("COMMIT");
-    return res.status(201).json({
-      session_id: sessionId,
-      overall_score: overallScore,
-      grade,
-      calories_burned_kcal: totalCalories,
-    });
+    return res.status(201).json({ session_id: sessionId, overall_score: overallScore, grade });
   } catch (err) {
     await client.query("ROLLBACK");
     console.error(err);
@@ -1076,6 +901,7 @@ app.post("/api/v1/run/submit", auth, async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
 app.listen(process.env.PORT || 3000, () => {
-  console.log(`API v3 running on http://localhost:${process.env.PORT || 3000}`);
+  console.log(`API running on http://localhost:${process.env.PORT || 3000}`);
 });

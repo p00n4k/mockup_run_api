@@ -1,17 +1,49 @@
-﻿# Flood Run API — Documentation v2
+﻿# Flood Run API — Documentation v3
 
 Base URL: `http://localhost:3000`
 
 > **Dev mode:** Auth middleware is bypassed. All protected endpoints use `user_id = 1` automatically. No real token required.
 
-## Schema notes (v2)
+## Schema notes (v3)
 
 | Change | Detail |
 |--------|--------|
-| `run_sessions` | Removed: `distance_km`, `start_lat`, `start_lng`, `end_lat`, `end_lng` — all derived from `run_location_point` |
-| `run_environment_summary` | Now a **VIEW** — no insert, auto-aggregates from `run_location_point` |
-| `run_smart_watch_summary` | Now a **VIEW** in `identity` schema — auto-aggregates from `run_watch_point` |
-| `run_location_point` | Added: `wind_direction`, `cloud_cover_pct`, `rain_probability` |
+| `run_environment_summary` | VIEW → **TABLE** — populated atomically on `POST /run/submit` |
+| `run_smart_watch_summary` | VIEW → **TABLE** in `identity` schema — populated atomically on `POST /run/submit` |
+| `run_sessions.started_at` / `ended_at` | `timestamp` → `timestamptz` (Asia/Bangkok) |
+| `run_location_point.recorded_at`, `run_watch_point.recorded_at` | `timestamp` → `timestamptz` |
+| `run_sessions.route_polyline` | `varchar(2000)` → `text` (รองรับ route ยาว เช่น marathon) |
+| `run_scores` | INSERT อัตโนมัติตอน submit — คำนวณ MET-based calories + overall_score |
+| `POST /users/me/profile` | `weight_kg` กลายเป็น **required** ก่อนจะ submit run ได้ |
+| `POST /run/submit` | เพิ่ม `route_coordinates` (optional) — array `[[lng, lat], ...]` ใช้สร้าง `route_geom` ตรงๆ |
+
+### Score formula
+
+```
+ActivityScore = min(70, calories × 0.2)
+PMScore       = max(0, 20 - avg_pm25 × 0.4)
+HeatScore     = max(0, 10 - (avg_heat_index - 30) × 0.5)
+overall_score = ActivityScore + PMScore + HeatScore   (max 100)
+```
+
+| overall_score | grade |
+|---|---|
+| ≥ 90 | excellent |
+| ≥ 75 | good |
+| ≥ 60 | moderate |
+| ≥ 40 | poor |
+| < 40 | very_poor |
+
+### MET table (used for calorie calculation)
+
+| Speed (km/h) | MET |
+|---|---|
+| ≥ 12 | 12 |
+| ≥ 10 | 10 |
+| ≥ 8  | 8 |
+| ≥ 5  | 6 |
+| ≥ 3  | 3 |
+| < 3  | 2 |
 
 ---
 
@@ -30,11 +62,13 @@ Base URL: `http://localhost:3000`
 | 9 | GET | JWT | `/api/v1/run/session/:id/route` | Route geometry + per-min points |
 | 10 | GET | JWT | `/api/v1/run/session/:id/env` | Env summary + per-min readings |
 | 11 | GET | JWT | `/api/v1/run/session/:id/biometric` | Biometric summary + per-min readings |
-| 12 | GET | JWT | `/api/v1/run/weekly` | 7-day summary |
-| 13 | GET | JWT | `/api/v1/run/monthly` | Monthly summary |
-| 14 | GET | JWT | `/api/v1/run/nearby` | Nearby sessions (PostGIS) |
-| 15 | GET | Public | `/api/v1/run/env` | Current env at a location (mock) |
-| 16 | POST | JWT | `/api/v1/run/submit` | Submit run session + points batch |
+| 12 | GET | JWT | `/api/v1/run/session/:id/point/:point_id` | Single point — location + env + biometric |
+| 13 | GET | JWT | `/api/v1/run/session/:id/points?ids=…` | Multiple points by id list |
+| 14 | GET | JWT | `/api/v1/run/weekly` | 7-day summary |
+| 15 | GET | JWT | `/api/v1/run/monthly` | Monthly summary |
+| 16 | GET | JWT | `/api/v1/run/nearby` | Nearby sessions (PostGIS) |
+| 17 | GET | Public | `/api/v1/run/env` | Current env at a location (mock) |
+| 18 | POST | JWT | `/api/v1/run/submit` | Submit run session + points batch |
 
 ---
 
@@ -339,7 +373,7 @@ curl "http://localhost:3000/api/v1/run/session/1/route" \
 
 ### 10. GET /api/v1/run/session/:id/env
 
-Env summary (auto-aggregated VIEW) + per-minute readings  
+Env summary (pre-computed table, populated on submit) + per-minute readings  
 Points now include `wind_direction`, `cloud_cover_pct`, `rain_probability`
 
 ```bash
@@ -392,7 +426,7 @@ curl "http://localhost:3000/api/v1/run/session/1/env" \
 
 ### 11. GET /api/v1/run/session/:id/biometric
 
-Biometric summary (auto-aggregated VIEW) + per-minute smartwatch readings
+Biometric summary (pre-computed table, populated on submit) + per-minute smartwatch readings
 
 ```bash
 curl "http://localhost:3000/api/v1/run/session/1/biometric" \
@@ -444,11 +478,119 @@ curl "http://localhost:3000/api/v1/run/session/1/biometric" \
 ```
 
 > `calories_burned_kcal` in points is **cumulative** — the last value equals the session total  
-> `training_load` and `recovery_time_hr` are `null` (not yet computed by the VIEW)
+> `summary.calories_burned_kcal` comes from `MAX(watch_point.calories_burned_kcal)` (smartwatch)  
+> `run_scores.calories_burned_kcal` is independent — calculated server-side from MET × weight × duration  
+> `training_load` and `recovery_time_hr` are `null` (not computed)
 
 ---
 
-### 12. GET /api/v1/run/weekly
+### 12. GET /api/v1/run/session/:id/point/:point_id
+
+ดึงข้อมูลของจุดเดียว (per-minute) — รวม location + environment + biometric ใน response เดียว
+
+`:point_id` คือ `id` ของ `run_location_point` (มาจาก field `id` ใน response ของ `/route`, `/env`, `/biometric`)
+
+```bash
+curl http://localhost:3000/api/v1/run/session/1/point/15 \
+  -H "Authorization: Bearer <your_access_token>"
+```
+
+**Response 200** (มี smartwatch)
+```json
+{
+  "session_id": 1,
+  "point_id": 15,
+  "elapsed_sec": 180,
+  "recorded_at": "2026-05-26T06:03:00+07:00",
+  "location": {
+    "lat": 13.7308,
+    "lng": 100.5418,
+    "elevation_m": 12.5,
+    "distance_km": 0.521,
+    "current_pace_sec": 345
+  },
+  "environment": {
+    "temperature": 32.4,
+    "feels_like": 38.1,
+    "humidity": 68.0,
+    "aqi": 87,
+    "pm25": 42.3,
+    "pm10": 65.1,
+    "co": 0.412,
+    "uv_index": 7.2,
+    "wind_speed": 2.1,
+    "wind_direction": 180.0,
+    "cloud_cover_pct": 35.0,
+    "rain_probability": 10.0
+  },
+  "biometric": {
+    "heart_rate_bpm": 152,
+    "blood_oxygen_pct": 97.5,
+    "hrv_ms": 45.2,
+    "vo2max": 48.5,
+    "cadence_spm": 168,
+    "respiratory_rate_bpm": 28.5,
+    "calories_burned_kcal": 42.50
+  }
+}
+```
+
+> ถ้า session ไม่มี smartwatch data จุดนั้น → `"biometric": null`
+
+**Response 404** — point ไม่อยู่ / ไม่ใช่ของ session นี้ / ไม่ใช่ของ user
+```json
+{ "message": "Point not found" }
+```
+
+---
+
+### 13. GET /api/v1/run/session/:id/points?ids=15,28
+
+ดึงข้อมูลหลายจุดพร้อมกัน (batch) — เหมาะกับการเทียบสองจังหวะ เช่นนาทีที่ออกตัว vs นาทีที่เหนื่อยสุด
+
+| Query Param | Type | Required | Description |
+|-------------|------|----------|-------------|
+| `ids` | string | yes | list ของ `point_id` คั่นด้วย comma เช่น `15,28,42` |
+
+```bash
+curl "http://localhost:3000/api/v1/run/session/1/points?ids=15,28" \
+  -H "Authorization: Bearer <your_access_token>"
+```
+
+**Response 200**
+```json
+{
+  "session_id": 1,
+  "requested_ids": [15, 28],
+  "count": 2,
+  "points": [
+    {
+      "point_id": 15,
+      "elapsed_sec": 180,
+      "recorded_at": "2026-05-26T06:03:00+07:00",
+      "location":   { "lat": 13.7308, "lng": 100.5418, "elevation_m": 12.5, "distance_km": 0.521, "current_pace_sec": 345 },
+      "environment":{ "temperature": 32.4, "feels_like": 38.1, "humidity": 68.0, "aqi": 87, "pm25": 42.3, "pm10": 65.1, "co": 0.412, "uv_index": 7.2, "wind_speed": 2.1, "wind_direction": 180.0, "cloud_cover_pct": 35.0, "rain_probability": 10.0 },
+      "biometric": { "heart_rate_bpm": 152, "blood_oxygen_pct": 97.5, "hrv_ms": 45.2, "vo2max": 48.5, "cadence_spm": 168, "respiratory_rate_bpm": 28.5, "calories_burned_kcal": 42.50 }
+    },
+    {
+      "point_id": 28,
+      "elapsed_sec": 600,
+      "recorded_at": "2026-05-26T06:10:00+07:00",
+      "location":   { "...": "..." },
+      "environment":{ "...": "..." },
+      "biometric":  { "...": "..." }
+    }
+  ]
+}
+```
+
+> - `points` เรียงตาม `elapsed_sec` (น้อย → มาก) ไม่ใช่ตามลำดับใน `ids`
+> - `id` ที่ไม่ใช่ของ session นี้จะถูกข้าม (ไม่ error) — `count` จะน้อยกว่า `requested_ids.length`
+> - ส่ง `ids` ว่างหรือ malformed → 400
+
+---
+
+### 14. GET /api/v1/run/weekly
 
 7-day summary
 
@@ -470,7 +612,7 @@ curl http://localhost:3000/api/v1/run/weekly \
 
 ---
 
-### 13. GET /api/v1/run/monthly
+### 15. GET /api/v1/run/monthly
 
 Monthly summary — use when user changes month on the calendar
 
@@ -498,7 +640,7 @@ curl "http://localhost:3000/api/v1/run/monthly?year=2026&month=5" \
 
 ---
 
-### 14. GET /api/v1/run/nearby
+### 16. GET /api/v1/run/nearby
 
 ค้นหา sessions ที่ route ผ่านใกล้พิกัดที่กำหนด (PostGIS `ST_DWithin` บน `route_geom`)  
 `start_lat/lng` derive จาก `run_location_point` (จุดที่มี `elapsed_sec` น้อยสุด)
@@ -538,7 +680,7 @@ curl "http://localhost:3000/api/v1/run/nearby?lat=13.7300&lng=100.5440&radius_km
 
 ---
 
-### 15. GET /api/v1/run/env  (Public)
+### 17. GET /api/v1/run/env  (Public)
 
 สภาพแวดล้อมปัจจุบัน ณ พิกัด — mock data (ไม่ต้อง token)
 
@@ -575,29 +717,29 @@ curl "http://localhost:3000/api/v1/run/env?lat=13.7283&lng=100.5418"
 
 ---
 
-### 16. POST /api/v1/run/submit
+### 18. POST /api/v1/run/submit
 
 บันทึกข้อมูลการวิ่งแบบ batch — device เก็บข้อมูลทุก 1 นาที แล้วส่งทั้งหมดมาครั้งเดียวหลังวิ่งเสร็จ
 
 > **`watch_points` เป็น optional** — ละไว้หรือส่ง `[]` ถ้าไม่ได้ใส่ smartwatch  
 > ถ้าส่ง `watch_points` มา จำนวนต้องเท่ากับ `location_points` (1-to-1)  
-> `run_environment_summary` และ `run_smart_watch_summary` เป็น **VIEW** — server ไม่ต้อง insert แยก ค่าจะถูก aggregate อัตโนมัติจาก points ที่ insert
+> Server จะคำนวณและ INSERT `run_environment_summary`, `run_smart_watch_summary`, `run_scores` ในทรานแซกชันเดียวกัน  
+> **ต้องมี `weight_kg` ใน user profile** ก่อน submit (มิฉะนั้น 400 — ใช้ POST `/users/me/profile` อัปเดต)
 
 **Body fields**
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `started_at` | ISO datetime | Yes | เวลาเริ่มวิ่ง |
+| `started_at` | ISO datetime | Yes | เวลาเริ่มวิ่ง (timestamptz, Asia/Bangkok) |
 | `ended_at` | ISO datetime | Yes | เวลาสิ้นสุด |
 | `duration_sec` | number | No | เวลารวม (วินาที) |
 | `avg_pace_sec` | number | No | Pace เฉลี่ย (วินาที/กม.) |
 | `min_pace_sec` | number | No | Pace เร็วสุด |
 | `max_pace_sec` | number | No | Pace ช้าสุด |
-| `route_polyline` | string | No | Google Encoded Polyline |
+| `route_polyline` | string | No | Google Encoded Polyline (เก็บแบบ compact) |
+| `route_coordinates` | array `[[lng, lat], ...]` | No | **ใช้สร้าง `route_geom` ตรงๆ** ถ้าไม่ส่งจะ fallback ไปใช้ `location_points` |
 | `location_points` | array | No | GPS + environment ทุก 1 นาที |
-| `watch_points` | array | No | Biometric จาก smartwatch ทุก 1 นาที — **optional**, ละไว้หรือส่ง `[]` ถ้าไม่มี smartwatch |
-
-> **Removed from v1:** `distance_km`, `start_lat`, `start_lng`, `end_lat`, `end_lng` — derive อัตโนมัติจาก `location_points`
+| `watch_points` | array | No | Biometric จาก smartwatch — optional |
 
 **`location_points[]` fields**
 
@@ -650,7 +792,14 @@ curl -X POST http://localhost:3000/api/v1/run/submit \
     "avg_pace_sec": 403,
     "min_pace_sec": 358,
     "max_pace_sec": 450,
-    "route_polyline": null,
+    "route_polyline": "{hxrAgatdR{OgYgc@fEoFnd@",
+    "route_coordinates": [
+      [100.5418, 13.7283],
+      [100.5430, 13.7293],
+      [100.5445, 13.7302],
+      [100.5455, 13.7308],
+      [100.5460, 13.7310]
+    ],
     "location_points": [
       {
         "elapsed_sec": 0, "recorded_at": "2026-05-25T06:00:00.000Z",
@@ -720,13 +869,19 @@ curl -X POST http://localhost:3000/api/v1/run/submit \
 
 **Response** `201 Created`
 ```json
-{ "session_id": 11 }
+{
+  "session_id": 11,
+  "overall_score": 80.45,
+  "grade": "good",
+  "calories_burned_kcal": 322
+}
 ```
 
-**Server auto-derives:**
-- `route_geom` (PostGIS LineString) — built from `location_points[].lat/lng`
-- `run_environment_summary` VIEW — aggregates from the inserted `run_location_point` rows
-- `run_smart_watch_summary` VIEW — aggregates from the inserted `run_watch_point` rows
+**Server auto-derives (single transaction):**
+- `route_geom` (PostGIS LineString) — สร้างจาก `route_coordinates` ถ้ามี, ไม่งั้น fallback `location_points[].lat/lng`
+- `run_environment_summary` — AVG/MIN/MAX จาก `location_points`
+- `run_smart_watch_summary` — AVG/MIN/MAX จาก `watch_points` (ถ้ามี)
+- `run_scores` — MET-based calories + ActivityScore + PMScore + HeatScore + grade
 
 ---
 
@@ -735,7 +890,8 @@ curl -X POST http://localhost:3000/api/v1/run/submit \
 | Status | Body | Cause |
 |--------|------|-------|
 | `400` | `{ "message": "lat and lng are required" }` | Missing query params |
-| `400` | `{ "message": "location_points and watch_points must have the same length" }` | Array length mismatch |
+| `400` | `{ "message": "watch_points must have the same length as location_points" }` | Array length mismatch (เมื่อส่ง watch_points มา) |
+| `400` | `{ "message": "User weight is required. Please update your profile before submitting a run." }` | `weight_kg` ใน profile ว่าง — submit ไม่ได้ |
 | `400` | `{ "message": "year and month are required" }` | Missing monthly params |
 | `401` | `{ "message": "Invalid email or password" }` | Email not found |
 | `401` | `{ "message": "Invalid refresh token" }` | Token expired or invalid |

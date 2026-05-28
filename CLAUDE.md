@@ -92,6 +92,8 @@ psql $DATABASE_URL -f mock.sql
 | GET | `/api/v1/run/session/:id/route` | Route geometry + per-minute coordinate/pace/elevation |
 | GET | `/api/v1/run/session/:id/env` | Environment summary + per-minute env readings |
 | GET | `/api/v1/run/session/:id/biometric` | Smartwatch summary + per-minute biometric readings |
+| GET | `/api/v1/run/session/:id/point/:point_id` | จุดเดียว — location + env + biometric รวมกัน |
+| GET | `/api/v1/run/session/:id/points?ids=…` | หลายจุดพร้อมกัน (batch by point_id) |
 | GET | `/api/v1/run/weekly` | สรุป 7 วันย้อนหลัง |
 | GET | `/api/v1/run/nearby` | ค้นหา session ใกล้พิกัด (PostGIS) |
 | GET | `/api/v1/run/env` | สภาพแวดล้อม ณ พิกัด (mock, public) |
