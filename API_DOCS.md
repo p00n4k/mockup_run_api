@@ -60,8 +60,10 @@ overall_score = ActivityScore + PMScore + HeatScore   (max 100)
 | 7 | GET | JWT | `/api/v1/run/session_history` | Session list (paginated) |
 | 8 | GET | JWT | `/api/v1/run/session/:id` | Session overview + scores |
 | 9 | GET | JWT | `/api/v1/run/session/:id/route` | Route geometry + per-min points |
-| 10 | GET | JWT | `/api/v1/run/session/:id/env` | Env summary + per-min readings |
-| 11 | GET | JWT | `/api/v1/run/session/:id/biometric` | Biometric summary + per-min readings |
+| 10a | GET | JWT | `/api/v1/run/session/:id/env/summary` | Env summary only |
+| 10b | GET | JWT | `/api/v1/run/session/:id/env/points` | Env per-min readings only |
+| 11a | GET | JWT | `/api/v1/run/session/:id/biometric/summary` | Biometric summary only |
+| 11b | GET | JWT | `/api/v1/run/session/:id/biometric/points` | Biometric per-min readings only |
 | 12 | GET | JWT | `/api/v1/run/session/:id/point/:point_id` | Single point — location + env + biometric |
 | 13 | GET | JWT | `/api/v1/run/session/:id/points?ids=…` | Multiple points by id list |
 | 14 | GET | JWT | `/api/v1/run/weekly` | 7-day summary |
@@ -155,6 +157,7 @@ curl http://localhost:3000/api/v1/users/me/profile \
   "id": 1,
   "name": "Pawin Khamlaksana",
   "email": "pawin@example.com",
+  "profile_image_url": "https://i.pravatar.cc/300?u=1",
   "birthday": "2004-08-15",
   "gender": "male",
   "height_cm": "175.00",
@@ -176,13 +179,16 @@ curl http://localhost:3000/api/v1/users/me/profile \
   "stats_period_start": "2026-04-25T00:00:00.000Z",
   "stats_period_end": "2026-05-25T00:00:00.000Z",
   "environment_scores": {
-    "score_all_time": "78.52",
-    "score_yearly":   "78.52",
-    "score_monthly":  "82.30",
-    "score_weekly":   "80.40"
+    "avg_score_all_time": "78.52",
+    "avg_score_yearly":   "78.52",
+    "avg_score_monthly":  "82.30",
+    "avg_score_weekly":   "80.40",
+    "total_overall_score": 392.5
   }
 }
 ```
+
+> `avg_score_*` = ค่าเฉลี่ย (AVG) ของ `overall_score` กรองตามช่วงเวลา — `total_overall_score` = ผลรวม (SUM) ทุก session
 
 ---
 
@@ -196,6 +202,7 @@ curl -X POST http://localhost:3000/api/v1/users/me/profile \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Pawin K.",
+    "profile_image_url": "https://i.pravatar.cc/300?u=1",
     "birthday": "2004-08-15",
     "gender": "male",
     "height_cm": 175.0,
@@ -212,14 +219,14 @@ curl -X POST http://localhost:3000/api/v1/users/me/profile \
   "id": 1,
   "name": "Pawin K.",
   "email": "pawin@example.com",
+  "profile_image_url": "https://i.pravatar.cc/300?u=1",
   "birthday": "2004-08-15",
   "gender": "male",
   "height_cm": "175.00",
   "weight_kg": "70.00",
   "step_length_cm": "72.00",
   "stride_length_cm": "144.00",
-  "preferred_units": "metric",
-  "profile_image_url": null
+  "preferred_units": "metric"
 }
 ```
 
@@ -371,13 +378,12 @@ curl "http://localhost:3000/api/v1/run/session/1/route" \
 
 ---
 
-### 10. GET /api/v1/run/session/:id/env
+### 10a. GET /api/v1/run/session/:id/env/summary
 
-Env summary (pre-computed table, populated on submit) + per-minute readings  
-Points now include `wind_direction`, `cloud_cover_pct`, `rain_probability`
+Env summary เท่านั้น (pre-computed table, populated on submit)
 
 ```bash
-curl "http://localhost:3000/api/v1/run/session/1/env" \
+curl "http://localhost:3000/api/v1/run/session/1/env/summary" \
   -H "Authorization: Bearer <your_access_token>"
 ```
 
@@ -397,7 +403,26 @@ curl "http://localhost:3000/api/v1/run/session/1/env" \
     "avg_uv_index": "6.80",     "min_uv_index": "6.80",     "max_uv_index": "6.80",
     "avg_wind_speed": "12.00",  "min_wind_speed": "12.00",  "max_wind_speed": "12.00",
     "avg_cloud_cover_pct": null,"min_cloud_cover_pct": null,"max_cloud_cover_pct": null
-  },
+  }
+}
+```
+
+---
+
+### 10b. GET /api/v1/run/session/:id/env/points
+
+Per-minute env readings ทั้งหมด  
+Points include `wind_direction`, `cloud_cover_pct`, `rain_probability`
+
+```bash
+curl "http://localhost:3000/api/v1/run/session/1/env/points" \
+  -H "Authorization: Bearer <your_access_token>"
+```
+
+**Response**
+```json
+{
+  "session_id": 1,
   "points": [
     {
       "id": 1,
@@ -424,12 +449,12 @@ curl "http://localhost:3000/api/v1/run/session/1/env" \
 
 ---
 
-### 11. GET /api/v1/run/session/:id/biometric
+### 11a. GET /api/v1/run/session/:id/biometric/summary
 
-Biometric summary (pre-computed table, populated on submit) + per-minute smartwatch readings
+Biometric summary เท่านั้น (pre-computed table, populated on submit)
 
 ```bash
-curl "http://localhost:3000/api/v1/run/session/1/biometric" \
+curl "http://localhost:3000/api/v1/run/session/1/biometric/summary" \
   -H "Authorization: Bearer <your_access_token>"
 ```
 
@@ -447,7 +472,29 @@ curl "http://localhost:3000/api/v1/run/session/1/biometric" \
     "active_energy_kcal": 371,
     "training_load": null,
     "recovery_time_hr": null
-  },
+  }
+}
+```
+
+> `summary.calories_burned_kcal` comes from `MAX(watch_point.calories_burned_kcal)` (smartwatch)  
+> `run_scores.calories_burned_kcal` is independent — calculated server-side from MET × weight × duration  
+> `training_load` and `recovery_time_hr` are `null` (not computed)
+
+---
+
+### 11b. GET /api/v1/run/session/:id/biometric/points
+
+Per-minute smartwatch readings ทั้งหมด
+
+```bash
+curl "http://localhost:3000/api/v1/run/session/1/biometric/points" \
+  -H "Authorization: Bearer <your_access_token>"
+```
+
+**Response**
+```json
+{
+  "session_id": 1,
   "points": [
     {
       "id": 1,
@@ -477,10 +524,7 @@ curl "http://localhost:3000/api/v1/run/session/1/biometric" \
 }
 ```
 
-> `calories_burned_kcal` in points is **cumulative** — the last value equals the session total  
-> `summary.calories_burned_kcal` comes from `MAX(watch_point.calories_burned_kcal)` (smartwatch)  
-> `run_scores.calories_burned_kcal` is independent — calculated server-side from MET × weight × duration  
-> `training_load` and `recovery_time_hr` are `null` (not computed)
+> `calories_burned_kcal` in points is **cumulative** — the last value equals the session total
 
 ---
 
@@ -488,7 +532,7 @@ curl "http://localhost:3000/api/v1/run/session/1/biometric" \
 
 ดึงข้อมูลของจุดเดียว (per-minute) — รวม location + environment + biometric ใน response เดียว
 
-`:point_id` คือ `id` ของ `run_location_point` (มาจาก field `id` ใน response ของ `/route`, `/env`, `/biometric`)
+`:point_id` คือ `id` ของ `run_location_point` (มาจาก field `id` ใน response ของ `/route`, `/env/points`, `/biometric/points`)
 
 ```bash
 curl http://localhost:3000/api/v1/run/session/1/point/15 \
@@ -683,6 +727,8 @@ curl "http://localhost:3000/api/v1/run/nearby?lat=13.7300&lng=100.5440&radius_km
 ### 17. GET /api/v1/run/env  (Public)
 
 สภาพแวดล้อมปัจจุบัน ณ พิกัด — mock data (ไม่ต้อง token)
+
+> ค่าสุ่มใหม่ทุกครั้งที่เรียก อยู่ในช่วงที่สมเหตุผลของกรุงเทพฯ (เช่น temperature 29–36, aqi 40–130, uv_index 2–11) — ค่าตัวอย่างด้านล่างเป็นแค่รูปแบบ response
 
 | Query Param | Type | Required |
 |-------------|------|----------|

@@ -129,7 +129,7 @@ app.post("/api/v1/auth/logout", auth, (req, res) => {
 app.get("/api/v1/users/me", auth, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT id, name, email, NULL AS profile_image_url
+      `SELECT id, name, email, profile_image_url
        FROM identity.users WHERE id = $1 LIMIT 1`,
       [req.user.id]
     );
@@ -148,7 +148,7 @@ app.get("/api/v1/users/me/profile", auth, async (req, res) => {
     const result = await pool.query(
       `
       SELECT
-        u.id, u.name, u.email,
+        u.id, u.name, u.email, u.profile_image_url,
         up.birthday, up.gender, up.height_cm, up.weight_kg,
         up.step_length_cm, up.stride_length_cm, up.preferred_units,
         uhs.resting_heart_rate_bpm, uhs.max_heart_rate_bpm,
@@ -172,10 +172,11 @@ app.get("/api/v1/users/me/profile", auth, async (req, res) => {
     const scoresResult = await pool.query(
       `
       SELECT
-        ROUND(AVG(res.overall_score)::numeric, 2) AS score_all_time,
-        ROUND(AVG(res.overall_score) FILTER (WHERE rs.started_at >= NOW() - INTERVAL '1 year')::numeric,  2) AS score_yearly,
-        ROUND(AVG(res.overall_score) FILTER (WHERE rs.started_at >= NOW() - INTERVAL '1 month')::numeric, 2) AS score_monthly,
-        ROUND(AVG(res.overall_score) FILTER (WHERE rs.started_at >= NOW() - INTERVAL '7 days')::numeric,  2) AS score_weekly
+        ROUND(AVG(res.overall_score)::numeric, 2) AS avg_score_all_time,
+        ROUND(AVG(res.overall_score) FILTER (WHERE rs.started_at >= NOW() - INTERVAL '1 year')::numeric,  2) AS avg_score_yearly,
+        ROUND(AVG(res.overall_score) FILTER (WHERE rs.started_at >= NOW() - INTERVAL '1 month')::numeric, 2) AS avg_score_monthly,
+        ROUND(AVG(res.overall_score) FILTER (WHERE rs.started_at >= NOW() - INTERVAL '7 days')::numeric,  2) AS avg_score_weekly,
+        COALESCE(SUM(res.overall_score), 0)::float AS total_overall_score
       FROM running.run_sessions rs
       JOIN running.run_scores res ON res.session_id = rs.id
       WHERE rs.user_id = $1
@@ -201,10 +202,13 @@ app.post("/api/v1/users/me/profile", auth, async (req, res) => {
   try {
     await client.query("BEGIN");
 
-    if (name !== undefined) {
+    if (name !== undefined || profile_image_url !== undefined) {
       await client.query(
-        `UPDATE identity.users SET name = $1 WHERE id = $2`,
-        [name, req.user.id]
+        `UPDATE identity.users SET
+           name = COALESCE($1, name),
+           profile_image_url = COALESCE($2, profile_image_url)
+         WHERE id = $3`,
+        [name ?? null, profile_image_url ?? null, req.user.id]
       );
     }
 
@@ -235,7 +239,7 @@ app.post("/api/v1/users/me/profile", auth, async (req, res) => {
 
     const result = await client.query(
       `
-      SELECT u.id, u.name, u.email,
+      SELECT u.id, u.name, u.email, u.profile_image_url,
         up.birthday, up.gender, up.height_cm, up.weight_kg,
         up.step_length_cm, up.stride_length_cm, up.preferred_units
       FROM identity.users u
@@ -245,7 +249,7 @@ app.post("/api/v1/users/me/profile", auth, async (req, res) => {
       [req.user.id]
     );
 
-    return res.json({ ...result.rows[0], profile_image_url: profile_image_url ?? null });
+    return res.json(result.rows[0]);
   } catch (err) {
     await client.query("ROLLBACK");
     console.error(err);
@@ -394,7 +398,7 @@ app.get("/api/v1/run/session/:id/route", auth, async (req, res) => {
   }
 });
 
-app.get("/api/v1/run/session/:id/env", auth, async (req, res) => {
+app.get("/api/v1/run/session/:id/env/summary", auth, async (req, res) => {
   try {
     const ownerCheck = await pool.query(
       `SELECT id FROM running.run_sessions WHERE id = $1 AND user_id = $2 LIMIT 1`,
@@ -404,54 +408,38 @@ app.get("/api/v1/run/session/:id/env", auth, async (req, res) => {
       return res.status(404).json({ message: "Session not found" });
     }
 
-    const [summaryResult, pointsResult] = await Promise.all([
-      pool.query(
-        `
-        SELECT
-          avg_heat_index,  min_heat_index,  max_heat_index,
-          avg_feels_like,  min_feels_like,  max_feels_like,
-          avg_temperature, min_temperature, max_temperature,
-          avg_humidity,    min_humidity,    max_humidity,
-          avg_pm25,        min_pm25,        max_pm25,
-          avg_pm10,        min_pm10,        max_pm10,
-          avg_co,          min_co,          max_co,
-          avg_aqi,         min_aqi,         max_aqi,
-          avg_uv_index,    min_uv_index,    max_uv_index,
-          avg_wind_speed,  min_wind_speed,  max_wind_speed,
-          avg_cloud_cover_pct, min_cloud_cover_pct, max_cloud_cover_pct
-        FROM running.run_environment_summary
-        WHERE session_id = $1
-        LIMIT 1
-        `,
-        [req.params.id]
-      ),
-      pool.query(
-        `
-        SELECT
-          id, elapsed_sec, recorded_at,
-          temperature, humidity, feels_like,
-          aqi, pm25, pm10, co, uv_index,
-          wind_speed, wind_direction, cloud_cover_pct, rain_probability
-        FROM running.run_location_point
-        WHERE session_id = $1
-        ORDER BY elapsed_sec
-        `,
-        [req.params.id]
-      ),
-    ]);
+    const summaryResult = await pool.query(
+      `
+      SELECT
+        avg_heat_index,  min_heat_index,  max_heat_index,
+        avg_feels_like,  min_feels_like,  max_feels_like,
+        avg_temperature, min_temperature, max_temperature,
+        avg_humidity,    min_humidity,    max_humidity,
+        avg_pm25,        min_pm25,        max_pm25,
+        avg_pm10,        min_pm10,        max_pm10,
+        avg_co,          min_co,          max_co,
+        avg_aqi,         min_aqi,         max_aqi,
+        avg_uv_index,    min_uv_index,    max_uv_index,
+        avg_wind_speed,  min_wind_speed,  max_wind_speed,
+        avg_cloud_cover_pct, min_cloud_cover_pct, max_cloud_cover_pct
+      FROM running.run_environment_summary
+      WHERE session_id = $1
+      LIMIT 1
+      `,
+      [req.params.id]
+    );
 
     return res.json({
       session_id: parseInt(req.params.id),
       summary: summaryResult.rows[0] ?? null,
-      points: pointsResult.rows,
     });
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ message: "Failed to get session environment data" });
+    return res.status(500).json({ message: "Failed to get session environment summary" });
   }
 });
 
-app.get("/api/v1/run/session/:id/biometric", auth, async (req, res) => {
+app.get("/api/v1/run/session/:id/env/points", auth, async (req, res) => {
   try {
     const ownerCheck = await pool.query(
       `SELECT id FROM running.run_sessions WHERE id = $1 AND user_id = $2 LIMIT 1`,
@@ -461,47 +449,99 @@ app.get("/api/v1/run/session/:id/biometric", auth, async (req, res) => {
       return res.status(404).json({ message: "Session not found" });
     }
 
-    const [summaryResult, pointsResult] = await Promise.all([
-      pool.query(
-        `
-        SELECT
-          avg_heart_rate_bpm,       min_heart_rate_bpm,       max_heart_rate_bpm,
-          avg_blood_oxygen_pct,     min_blood_oxygen_pct,     max_blood_oxygen_pct,
-          avg_respiratory_rate_bpm, min_respiratory_rate_bpm, max_respiratory_rate_bpm,
-          avg_hrv_ms,               min_hrv_ms,               max_hrv_ms,
-          avg_cadence_spm,          min_cadence_spm,          max_cadence_spm,
-          calories_burned_kcal, active_energy_kcal,
-          training_load, recovery_time_hr
-        FROM identity.run_smart_watch_summary
-        WHERE session_id = $1
-        LIMIT 1
-        `,
-        [req.params.id]
-      ),
-      pool.query(
-        `
-        SELECT
-          wp.id, wp.elapsed_sec, wp.recorded_at,
-          wp.heart_rate_bpm, wp.blood_oxygen_pct, wp.hrv_ms,
-          wp.vo2max, wp.cadence_spm, wp.respiratory_rate_bpm,
-          wp.calories_burned_kcal
-        FROM running.run_watch_point wp
-        JOIN running.run_location_point lp ON lp.id = wp.location_point_id
-        WHERE lp.session_id = $1
-        ORDER BY wp.elapsed_sec
-        `,
-        [req.params.id]
-      ),
-    ]);
+    const pointsResult = await pool.query(
+      `
+      SELECT
+        id, elapsed_sec, recorded_at,
+        temperature, humidity, feels_like,
+        aqi, pm25, pm10, co, uv_index,
+        wind_speed, wind_direction, cloud_cover_pct, rain_probability
+      FROM running.run_location_point
+      WHERE session_id = $1
+      ORDER BY elapsed_sec
+      `,
+      [req.params.id]
+    );
 
     return res.json({
       session_id: parseInt(req.params.id),
-      summary: summaryResult.rows[0] ?? null,
       points: pointsResult.rows,
     });
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ message: "Failed to get session biometric data" });
+    return res.status(500).json({ message: "Failed to get session environment points" });
+  }
+});
+
+app.get("/api/v1/run/session/:id/biometric/summary", auth, async (req, res) => {
+  try {
+    const ownerCheck = await pool.query(
+      `SELECT id FROM running.run_sessions WHERE id = $1 AND user_id = $2 LIMIT 1`,
+      [req.params.id, req.user.id]
+    );
+    if (ownerCheck.rows.length === 0) {
+      return res.status(404).json({ message: "Session not found" });
+    }
+
+    const summaryResult = await pool.query(
+      `
+      SELECT
+        avg_heart_rate_bpm,       min_heart_rate_bpm,       max_heart_rate_bpm,
+        avg_blood_oxygen_pct,     min_blood_oxygen_pct,     max_blood_oxygen_pct,
+        avg_respiratory_rate_bpm, min_respiratory_rate_bpm, max_respiratory_rate_bpm,
+        avg_hrv_ms,               min_hrv_ms,               max_hrv_ms,
+        avg_cadence_spm,          min_cadence_spm,          max_cadence_spm,
+        calories_burned_kcal, active_energy_kcal,
+        training_load, recovery_time_hr
+      FROM identity.run_smart_watch_summary
+      WHERE session_id = $1
+      LIMIT 1
+      `,
+      [req.params.id]
+    );
+
+    return res.json({
+      session_id: parseInt(req.params.id),
+      summary: summaryResult.rows[0] ?? null,
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: "Failed to get session biometric summary" });
+  }
+});
+
+app.get("/api/v1/run/session/:id/biometric/points", auth, async (req, res) => {
+  try {
+    const ownerCheck = await pool.query(
+      `SELECT id FROM running.run_sessions WHERE id = $1 AND user_id = $2 LIMIT 1`,
+      [req.params.id, req.user.id]
+    );
+    if (ownerCheck.rows.length === 0) {
+      return res.status(404).json({ message: "Session not found" });
+    }
+
+    const pointsResult = await pool.query(
+      `
+      SELECT
+        wp.id, wp.elapsed_sec, wp.recorded_at,
+        wp.heart_rate_bpm, wp.blood_oxygen_pct, wp.hrv_ms,
+        wp.vo2max, wp.cadence_spm, wp.respiratory_rate_bpm,
+        wp.calories_burned_kcal
+      FROM running.run_watch_point wp
+      JOIN running.run_location_point lp ON lp.id = wp.location_point_id
+      WHERE lp.session_id = $1
+      ORDER BY wp.elapsed_sec
+      `,
+      [req.params.id]
+    );
+
+    return res.json({
+      session_id: parseInt(req.params.id),
+      points: pointsResult.rows,
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: "Failed to get session biometric points" });
   }
 });
 
@@ -740,14 +780,29 @@ app.get("/api/v1/run/env", async (req, res) => {
   if (!lat || !lng) {
     return res.status(400).json({ message: "lat and lng are required" });
   }
+  // mock readings — สุ่มใหม่ทุกครั้งในช่วงที่สมเหตุผลของกรุงเทพฯ
+  const rnd = (min, max, decimals = 1) =>
+    parseFloat((min + Math.random() * (max - min)).toFixed(decimals));
+  const rndInt = (min, max) => Math.floor(min + Math.random() * (max - min + 1));
+
+  const temperature = rnd(29, 36);
+  const humidity = rnd(55, 85);
+  const feelsLike = parseFloat((temperature + humidity / 20).toFixed(1));
+
   return res.json({
     lat: parseFloat(lat),
     lng: parseFloat(lng),
-    temperature: 32.5, feels_like: 38.2, heat_index: 38.2,
-    humidity: 72, pm25: 24.5, pm10: 38.0, co: 0.42,
-    aqi: 75, uv_index: 7.2,
-    wind_speed: 12.0, wind_direction: 180,
-    cloud_cover_pct: 35, rain_probability: 20,
+    temperature, feels_like: feelsLike, heat_index: feelsLike,
+    humidity,
+    pm25: rnd(10, 60),
+    pm10: rnd(20, 90),
+    co: rnd(0.2, 0.9, 2),
+    aqi: rndInt(40, 130),
+    uv_index: rnd(2, 11),
+    wind_speed: rnd(2, 20),
+    wind_direction: rndInt(0, 359),
+    cloud_cover_pct: rndInt(0, 100),
+    rain_probability: rndInt(0, 80),
     recorded_at: new Date().toISOString(),
   });
 });

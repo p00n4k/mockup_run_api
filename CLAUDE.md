@@ -90,8 +90,10 @@ psql $DATABASE_URL -f mock.sql
 | GET | `/api/v1/run/session_history` | ประวัติการวิ่ง (paginated) |
 | GET | `/api/v1/run/session/:id` | Session overview — stats + scores |
 | GET | `/api/v1/run/session/:id/route` | Route geometry + per-minute coordinate/pace/elevation |
-| GET | `/api/v1/run/session/:id/env` | Environment summary + per-minute env readings |
-| GET | `/api/v1/run/session/:id/biometric` | Smartwatch summary + per-minute biometric readings |
+| GET | `/api/v1/run/session/:id/env/summary` | Environment summary (AVG/MIN/MAX) |
+| GET | `/api/v1/run/session/:id/env/points` | Per-minute env readings |
+| GET | `/api/v1/run/session/:id/biometric/summary` | Smartwatch summary (AVG/MIN/MAX) |
+| GET | `/api/v1/run/session/:id/biometric/points` | Per-minute biometric readings |
 | GET | `/api/v1/run/session/:id/point/:point_id` | จุดเดียว — location + env + biometric รวมกัน |
 | GET | `/api/v1/run/session/:id/points?ids=…` | หลายจุดพร้อมกัน (batch by point_id) |
 | GET | `/api/v1/run/weekly` | สรุป 7 วันย้อนหลัง |

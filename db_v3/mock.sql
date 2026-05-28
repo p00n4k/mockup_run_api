@@ -6,10 +6,10 @@
 
 -- ─── IDENTITY ────────────────────────────────────────────────
 
-INSERT INTO identity.users (id, email, name, created_at) VALUES
-(1, 'pawin@example.com',  'Pawin Khamlaksana', now()),
-(2, 'mali@example.com',   'Mali Srisuk',       now()),
-(3, 'niran@example.com',  'Niran Wongchai',    now());
+INSERT INTO identity.users (id, email, name, profile_image_url, created_at) VALUES
+(1, 'pawin@example.com',  'Pawin Khamlaksana', 'https://i.pravatar.cc/300?u=1', now()),
+(2, 'mali@example.com',   'Mali Srisuk',       'https://i.pravatar.cc/300?u=2', now()),
+(3, 'niran@example.com',  'Niran Wongchai',    NULL,                            now());
 
 INSERT INTO identity.user_profiles (
   user_id, birthday, gender,

@@ -64,6 +64,7 @@ const swaggerDocument = {
           id: { type: "integer", example: 1 },
           name: { type: "string", example: "Pawin S." },
           email: { type: "string", format: "email" },
+          profile_image_url: { type: "string", nullable: true, example: "https://i.pravatar.cc/300?u=1" },
           birthday: { type: "string", format: "date", nullable: true, example: "1995-03-15" },
           gender: { type: "string", nullable: true, example: "male" },
           height_cm: { type: "number", nullable: true, example: 175 },
@@ -88,10 +89,12 @@ const swaggerDocument = {
             type: "object",
             nullable: true,
             properties: {
-              score_all_time: { type: "number", nullable: true, example: 72.45 },
-              score_yearly: { type: "number", nullable: true, example: 74.1 },
-              score_monthly: { type: "number", nullable: true, example: 76.3 },
-              score_weekly: { type: "number", nullable: true, example: 78.0 },
+              avg_score_all_time: { type: "number", nullable: true, example: 72.45 },
+              avg_score_yearly: { type: "number", nullable: true, example: 74.1 },
+              avg_score_monthly: { type: "number", nullable: true, example: 76.3 },
+              avg_score_weekly: { type: "number", nullable: true, example: 78.0 },
+              total_overall_score: { type: "number", nullable: true, example: 463.6 },
+              total_overall_score: { type: "number", example: 392.5 },
             },
           },
         },
@@ -236,11 +239,17 @@ const swaggerDocument = {
           rain_probability: { type: "number", nullable: true, example: 20 },
         },
       },
-      EnvResponse: {
+      EnvSummaryResponse: {
         type: "object",
         properties: {
           session_id: { type: "integer", example: 1 },
           summary: { $ref: "#/components/schemas/EnvSummary" },
+        },
+      },
+      EnvPointsResponse: {
+        type: "object",
+        properties: {
+          session_id: { type: "integer", example: 1 },
           points: { type: "array", items: { $ref: "#/components/schemas/EnvPoint" } },
         },
       },
@@ -284,11 +293,17 @@ const swaggerDocument = {
           calories_burned_kcal: { type: "number", nullable: true, example: 85.3 },
         },
       },
-      BiometricResponse: {
+      BiometricSummaryResponse: {
         type: "object",
         properties: {
           session_id: { type: "integer", example: 1 },
           summary: { $ref: "#/components/schemas/BiometricSummary" },
+        },
+      },
+      BiometricPointsResponse: {
+        type: "object",
+        properties: {
+          session_id: { type: "integer", example: 1 },
           points: { type: "array", items: { $ref: "#/components/schemas/BiometricPoint" } },
         },
       },
@@ -645,29 +660,57 @@ const swaggerDocument = {
         },
       },
     },
-    "/api/v1/run/session/{id}/env": {
+    "/api/v1/run/session/{id}/env/summary": {
       get: {
         tags: ["Run"],
-        summary: "Session environment",
-        description: "Environment summary + per-minute env readings",
+        summary: "Session environment summary",
+        description: "Environment summary (AVG/MIN/MAX) ต่อ session",
         security: [{ bearerAuth: [] }],
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "integer" }, example: 1 }],
         responses: {
-          200: { description: "Environment data", content: { "application/json": { schema: { $ref: "#/components/schemas/EnvResponse" } } } },
+          200: { description: "Environment summary", content: { "application/json": { schema: { $ref: "#/components/schemas/EnvSummaryResponse" } } } },
           404: { description: "Session not found", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } },
           500: { description: "Server error", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } },
         },
       },
     },
-    "/api/v1/run/session/{id}/biometric": {
+    "/api/v1/run/session/{id}/env/points": {
       get: {
         tags: ["Run"],
-        summary: "Session biometric",
-        description: "Smartwatch summary + per-minute biometric readings",
+        summary: "Session environment points",
+        description: "Per-minute env readings ทั้งหมดของ session",
         security: [{ bearerAuth: [] }],
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "integer" }, example: 1 }],
         responses: {
-          200: { description: "Biometric data", content: { "application/json": { schema: { $ref: "#/components/schemas/BiometricResponse" } } } },
+          200: { description: "Environment points", content: { "application/json": { schema: { $ref: "#/components/schemas/EnvPointsResponse" } } } },
+          404: { description: "Session not found", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } },
+          500: { description: "Server error", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } },
+        },
+      },
+    },
+    "/api/v1/run/session/{id}/biometric/summary": {
+      get: {
+        tags: ["Run"],
+        summary: "Session biometric summary",
+        description: "Smartwatch summary (AVG/MIN/MAX) ต่อ session",
+        security: [{ bearerAuth: [] }],
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "integer" }, example: 1 }],
+        responses: {
+          200: { description: "Biometric summary", content: { "application/json": { schema: { $ref: "#/components/schemas/BiometricSummaryResponse" } } } },
+          404: { description: "Session not found", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } },
+          500: { description: "Server error", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } },
+        },
+      },
+    },
+    "/api/v1/run/session/{id}/biometric/points": {
+      get: {
+        tags: ["Run"],
+        summary: "Session biometric points",
+        description: "Per-minute biometric readings ทั้งหมดของ session",
+        security: [{ bearerAuth: [] }],
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "integer" }, example: 1 }],
+        responses: {
+          200: { description: "Biometric points", content: { "application/json": { schema: { $ref: "#/components/schemas/BiometricPointsResponse" } } } },
           404: { description: "Session not found", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } },
           500: { description: "Server error", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } },
         },
@@ -787,7 +830,7 @@ const swaggerDocument = {
       get: {
         tags: ["Environment"],
         summary: "Current environment at coordinates",
-        description: "สภาพแวดล้อม ณ พิกัดที่กำหนด (mock data, ไม่ต้อง auth)",
+        description: "สภาพแวดล้อม ณ พิกัดที่กำหนด (mock data, ไม่ต้อง auth) — ค่าสุ่มใหม่ทุกครั้งในช่วงที่สมเหตุผล",
         parameters: [
           { name: "lat", in: "query", required: true, schema: { type: "number" }, example: 13.7563 },
           { name: "lng", in: "query", required: true, schema: { type: "number" }, example: 100.5018 },

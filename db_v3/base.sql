@@ -22,6 +22,7 @@ CREATE TABLE identity.users (
   id SERIAL PRIMARY KEY,
   email varchar(255) UNIQUE NOT NULL,
   name varchar(100) NOT NULL,
+  profile_image_url text,
   created_at timestamp DEFAULT now()
 );
 
